@@ -2,7 +2,6 @@
 
 I wrote this script during the gruelling process of installing and setting up a web server.
 It perfectly reproduces my successful steps to ensure the same setup time and time again.
-Deviate from one command and everything might fall apart unless you know better!
 
 I've linked this file on Github to a shorter, more memorable address on my LARBS.xyz domain, so you can get it on your machine with this short command:
 
@@ -13,7 +12,7 @@ curl -LO lukesmith.xyz/emailwiz.sh
 When asked by a dialog menu at the beginning, select "Internet Site", then give your full domain without any subdomain, i.e. `lukesmith.xyz`.
 
 Read this readme and peruse the script's comments before running it.
-Expect it to fail.
+Expect it to fail and you have to do bug testing and you will be very happy when it actually works perfectly.
 
 ## This script...
 
@@ -36,7 +35,7 @@ Expect it to fail.
 - **SSL for your site's mail subdomain**, specifically for mail.yourdomain.tld with Let's Encrypt. The script will look to Let's Encrypt's generated configs. If you have some other SSL system, you can manually change the SSL locations in the script before running it and it should be fine.
 - After the script runs, you'll have to add an *additional DNS TXT record* which involves the OpenDKIM key that it generates during the script.
 
-## Don't get offended by this section
+## Caveats
 
 My intention is to have this script working for me on my Debian web server which I have with Vultr.
 Different VPS hosts or distros might have a startup config that's a little different and I'm sure as heck not going to make sure everything works on every possible machine out there, please do not even ask.
