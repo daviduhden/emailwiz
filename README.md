@@ -6,7 +6,7 @@ same setup time and time again.
 
 I've linked this file on Github to a shorter, more memorable address on my LARBS.xyz domain, so you can get it on your machine with this short command:
 
-```
+```sh
 curl -LO lukesmith.xyz/emailwiz.sh
 ```
 
@@ -16,8 +16,8 @@ give your full domain without any subdomain, i.e. `lukesmith.xyz`.
 ## This script installs
 
 - **Postfix** to send and receive mail.
-- **Dovecot** to get mail to your email client (mutt, Thunderbird, etc.).
-- Config files that unique the two above securely with native log-ins.
+- **Dovecot** to get mail to your email client (mutt, Thunderbird, etc).
+- Config files that link the two above securely with native log-ins.
 - **Spamassassin** to prevent spam and allow you to make custom filters.
 - **OpenDKIM** to validate you so you can send to Gmail and other big sites.
 
@@ -110,11 +110,16 @@ email program. For my domain, the server information will be as follows:
 - SMTP port: 587
 - IMAP server: `mail.lukesmith.xyz`
 - IMAP port: 993
+- Username `luke` (i.e. *not* `luke@lukesmith.xyz`)
 
-In previous versions of emailwiz, you also had to log on with *only* your
-username (i.e. `luke`) rather than your whole email address (i.e.
-`luke@lukesmith.xyz`), which caused some confusion.  This is no longer the
-case.
+The last point is important. Many email systems use a full email address on
+login. Since we just simply use local PAM logins, only the user's name is used
+(this makes a difference if you're using my
+[mutt-wizard](https://github.com/lukesmithxyz/mutt-wizard), etc.).
+
+## Tweaking things
+
+You're a big boy now if you have your own mail server!
 
 ## Benefited from this?
 
@@ -137,3 +142,5 @@ support me at [lukesmith.xyz/donate](https://lukesmith.xyz/donate.html).
   worry if you are: sometimes especially new domains are automatically assumed
   to be spam temporaily. If you are blacklisted by one of these, look into it
   and it will explain why and how to remove yourself.
+- Check your DNS settings using [this site](https://intodns.com/), it'll report any issues with your MX records
+- Ensure that port 25 is open on your server. [Vultr](https://www.vultr.com/docs/what-ports-are-blocked) for instance blocks this by default, you need to open a support ticket with them to open it. You can't send mail if 25 is blocked
