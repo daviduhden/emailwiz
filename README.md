@@ -9,7 +9,7 @@ sizeable network of people with email servers thanks to this script.
 
 I've linked this file on Github to a shorter, more memorable address on my LARBS.xyz domain, so you can get it on your machine with this short command:
 
-```
+```sh
 curl -LO lukesmith.xyz/emailwiz.sh
 ```
 
@@ -19,8 +19,8 @@ give your full domain without any subdomain, i.e. `lukesmith.xyz`.
 ## This script installs
 
 - **Postfix** to send and receive mail.
-- **Dovecot** to get mail to your email client (mutt, Thunderbird, etc.).
-- Config files that unique the two above securely with native log-ins.
+- **Dovecot** to get mail to your email client (mutt, Thunderbird, etc).
+- Config files that link the two above securely with native log-ins.
 - **Spamassassin** to prevent spam and allow you to make custom filters.
 - **OpenDKIM** to validate you so you can send to Gmail and other big sites.
 
@@ -111,6 +111,7 @@ email program. For my domain, the server information will be as follows:
 - SMTP port: 587
 - IMAP server: `mail.lukesmith.xyz`
 - IMAP port: 993
+- Username `luke` (i.e. *not* `luke@lukesmith.xyz`)
 
 In previous versions of emailwiz, you also had to log on with *only* your
 username (i.e. `luke`) rather than your whole email address (i.e.
