@@ -107,6 +107,10 @@ postconf -e 'home_mailbox = Mail/Inbox/'
 # Prevent "Received From:" header in sent emails in order to prevent leakage of public ip addresses
 postconf -e "header_checks = regexp:/etc/postfix/header_checks"
 
+# Create a login map file that ensures that if a sender wants to send a mail from a user at our local
+# domain, they must be authenticated as that user
+echo "/^(.*)@$(sh -c "echo $domain | sed 's/\./\\\./'")$/   \${1}" > /etc/postfix/login_maps.pcre
+
 # strips "Received From:" in sent emails
 echo "/^Received:.*/     IGNORE
 /^X-Originating-IP:/    IGNORE" >> /etc/postfix/header_checks
