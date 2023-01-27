@@ -23,55 +23,66 @@ give your full domain without any subdomain, i.e. `lukesmith.xyz`.
 - Config files that link the two above securely with native log-ins.
 - **Spamassassin** to prevent spam and allow you to make custom filters.
 - **OpenDKIM** to validate you so you can send to Gmail and other big sites.
+- The required SSL certificates if not already present.
 
 ## This script does _not_
 
-- use a SQL database or anything like that.
-- set up a graphical interface for mail like Roundcube or Squirrel Mail. If you
-  want that, you'll have to install it yourself. I just use
-  [isync/msmtp/mutt-wizard](https://github.com/lukesmithxyz/mutt-wizard) to
-  have an offline mirror of my email setup and I recommend the same. There are
-  other ways of doing it though, like Thunderbird, etc.
+- use a SQL database or anything like that. We keep it simple and use normal
+  Unix system users for accounts and passwords.
+- set up a graphical web interface for mail like Roundcube or Squirrel Mail.
+  You are expected to use a normal mail client like Thunderbird or K-9 for
+  Android or good old mutt with
+  [mutt-wizard](https://github.com/lukesmithxyz/mutt-wizard). Note that there
+  is a guide for [Rainloop](https://landchad.net/rainloop/) on
+  [LandChad.net](https://landchad.net) for those that want such a web
+  interface.
 
-## Before you run this script you need...
+## Prerequisites for Installation
 
-1. A **Debian or Ubuntu server**. I've tested this on a
-   [Vultr](https://www.vultr.com/?ref=8940911-8H) Debian server and one running
-   Ubuntu and their setup works, but I suspect other VPS hosts will have
-   similar/possibly identical default settings which will let you run this on
-   them. Note that the affiliate link there to Vultr gives you a $100 credit
-   for the first month to play around.
-2. **A Let's Encrypt SSL certificate for your site's `mail.` subdomain**.
-3. You need two little DNS records set on your domain registrar's site/DNS
-   server: (1) an **MX record** pointing to your own main domain/IP and (2) a
-   **CNAME record** for your `mail.` subdomain.
-4. **A Reverse DNS entry for your site.** Go to your VPS settings and add an
-   entry for your IPv4 Reverse DNS that goes from your IP address to
-   `<mail.yourdomain.com>`. If you would like IPv6, you can do the same for
-   that. This has been tested on Vultr, and all decent VPS hosts will have a
-   section on their instance settings page to add a reverse DNS PTR entry. You
-   can use the 'Test Email Server' or ':smtp' tool on
-   [mxtoolbox](https://mxtoolbox.com/SuperTool.aspx) to test if you set up a
-   reverse DNS correctly. This step is not required for everyone, but some big
-   email services like Gmail will stop emails coming from mail servers with
-   no/invalid rDNS lookups. This means your email will fail to even make it to
-   the recipients spam folder; it will never make it to them.
-5. `apt purge` all your previous (failed) attempts to install and configure a
-   mail server. Get rid of _all_ your system settings for Postfix, Dovecot,
-   OpenDKIM and everything else. This script builds off of a fresh install.
-6. Some VPS providers block mail port numbers like 25, 993 or 587 by default.
-   You may need to request these ports be opened to send mail successfully.
-   Vultr and most other VPS providers will respond immediately and open the
-   ports for you if you open a support ticket.
-7. If you have a firewall, you'll need to open ports on your side as well. For
-   example, with `ufw`, just run: `ufw allow 587` on ports 587, 993 and 25 (you
-   will need port 80 for Certbot too).
+1. Debian or Ubuntu server. I suited this script for
+   [Vultr](https://www.vultr.com/?ref=8940911-8H) servers originally, but it
+   works consistently on any normal setup.
+2. DNS records that point your domain to your server's IP (IPv4 and IPv6).
 
-## Post-install requirement!
+## Mandatory Finishing Touches
 
-- After the script runs, you'll have to add additional DNS TXT records which
-  are displayed at the end when the script is complete. They will help ensure
-  your mail is validated and secure.
+### Unblock your ports
+
+While the script enables your mail ports on your server, it is common practice
+for all VPS providers to block mail ports on their end by default. Open a help
+ticket with your VPS provider asking them to open your mail ports and they will
+do it in short order.
+
+### DNS records
+
+At the end of the script, you will be given some DNS records to add to your DNS
+server/registrar's website. These are mostly for authenticating your emails as
+non-spam. The 4 records are:
+
+1. An MX record directing to `mail.yourdomain.tld`.
+2. A TXT record for SPF (to reduce mail spoofing).
+3. A TXT record for DMARC policies.
+4. A TXT record with your public DKIM key. This record is long and **uniquely
+   generated** while running `emailwiz.sh` and thus must be added after
+   installation.
+
+They will look something like this:
+
+```
+@	MX	10	mail.example.org
+mail._domainkey.example.org    TXT     v=DKIM1; k=rsa; p=anextremelylongsequenceoflettersandnumbersgeneratedbyopendkim
+_dmarc.example.org     TXT     v=DMARC1; p=reject; rua=mailto:dmarc@example.org; fo=1
+example.org    TXT     v=spf1 mx a: -all
+```
+
+The script will create a file, `~/dns_emailwiz` that will list our the records
+for your convenience, and also prints them at the end of the script.
+
+### Add a rDNS/PTR record as well!
+
+Set a reverse DNS or PTR record to avoid getting spammed. You can do this at
+your VPS provider, and should set it to `mail.yourdomain.tld`. Note that you
+should set this for both IPv4 and IPv6.
 
 Configuring an email server is a living nightmare and that's why I made this script so I wouldn't have to do it again.
 Don't ask me to configure your email server unless you are paying me big bucks to do it.
@@ -104,29 +115,24 @@ in the server, you could just install mutt, add `set spoolfile="+Inbox"` to
 your `~/.muttrc` and use mutt to view and reply to mail. You'll probably want
 to log in remotely though:
 
-## Logging in from Thunderbird or mutt (and others) remotely
+## Logging in from email clients (Thunderbird/mutt/etc)
 
 Let's say you want to access your mail with Thunderbird or mutt or another
 email program. For my domain, the server information will be as follows:
 
 - SMTP server: `mail.lukesmith.xyz`
-- SMTP port: 587
+- SMTP port: 465
 - IMAP server: `mail.lukesmith.xyz`
 - IMAP port: 993
 - Username `luke` (i.e. *not* `luke@lukesmith.xyz`)
 
-In previous versions of emailwiz, you also had to log on with *only* your
-username (i.e. `luke`) rather than your whole email address (i.e.
-`luke@lukesmith.xyz`), which caused some confusion. This is no longer the
-case.
-
 ## Benefited from this?
 
-I am always glad to hear this script is still making life easy for people!  If
-this script or documentation has saved you some frustration, you can donate to
-support me at [lukesmith.xyz/donate](https://lukesmith.xyz/donate.html).
+I am always glad to hear this script is still making life easy for people. If
+this script or documentation has saved you some frustration, donate here:
 
-## Troubleshooting -- Can't send mail?
+- btc: `bc1qzw6mk80t3vrp2cugmgfjqgtgzhldrqac5axfh4`
+- xmr: `8A5v4Ci11Lz7BDoE2z2oPqMoNHzr5Zj8B3Q2N2qzqrUKhAKgNQYGSSaZDnBUWg6iXCiZyvC9mVCyGj5kGMJTi1zGKGM4Trm`
 
 - Always check `journalctl -xe` to see the specific problem.
 - Check with your VPS host and ask them to enable mail ports. Some providers
