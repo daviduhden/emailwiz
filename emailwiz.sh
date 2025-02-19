@@ -1,30 +1,45 @@
 #!/bin/sh
 
-# BEFORE INSTALLING
+cat <<EOF
+BEFORE INSTALLING
 
-# Have a Debian or Ubuntu server with a static IP and DNS records (usually
-# A/AAAA) that point your domain name to it.
+Have a Debian or Ubuntu server with a static IP and DNS records (usually
+A/AAAA) that point your domain name to it.
 
-# NOTE WHILE INSTALLING
+NOTE WHILE INSTALLING
 
-# On installation of Postfix, select "Internet Site" and put in TLD (without
-# `mail.` before it).
+On installation of Postfix, select "Internet Site" and put in TLD (without
+\`mail.\` before it).
 
-# AFTER INSTALLING
+AFTER INSTALLING
 
-# More DNS records will be given to you to install. One of them will be
-# different for every installation and is uniquely generated on your machine.
+More DNS records will be given to you to install. One of them will be
+different for every installation and is uniquely generated on your machine.
+EOF
+
+read -p "Have you read and understood the above instructions? (yes/no): " response
+if [ "$response" != "yes" ]; then
+    echo "Please read the instructions carefully before proceeding."
+    exit 1
+fi
+
+set -euo pipefail
 
 umask 0022
 
 install_packages="postfix postfix-pcre dovecot-imapd dovecot-pop3d dovecot-sieve opendkim opendkim-tools spamassassin spamc net-tools fail2ban bind9-host"
 
+echo "Stopping Dovecot and Postfix services..."
 systemctl -q stop dovecot
 systemctl -q stop postfix
+
+echo "Purging existing packages..."
 apt-get purge ?config-files -y $install_packages
+
+echo "Installing required packages..."
 apt-get install -y $install_packages
 
-domain="$(cat /etc/mailname)"
+domain="$(cat /etc/mailname | tr -d '[:space:]')"
 subdom=${MAIL_SUBDOM:-mail}
 maildomain="$subdom.$domain"
 certdir="/etc/letsencrypt/live/$maildomain"
@@ -38,9 +53,12 @@ use_cert_config="no"
 country_name="" # IT US UK IN etc etc
 state_or_province_name=""
 organization_name=""
-common_name="$( hostname -f )"
+common_name="$(hostname -f | tr -d '[:space:]')"
 
 if [ "$use_cert_config" = "yes" ]; then
+	echo "Creating certificate configuration..."
+	mkdir -p "$certdir"
+	chmod 700 "$certdir"
 	echo "[req]
 	default_bit = 4096
 	distinguished_name = req_distinguished_name
@@ -50,22 +68,24 @@ if [ "$use_cert_config" = "yes" ]; then
 	countryName             = $country_name
 	stateOrProvinceName     = $state_or_province_name
 	organizationName        = $organization_name
-	commonName              = $common_name " > $certdir/certconfig.conf
-
+	commonName              = $common_name " > "$certdir/certconfig.conf"
 fi
 
-# Preliminary record checks
-ipv4=$(host "$domain" | grep -m1 -Eo '([0-9]+\.){3}[0-9]+')
-[ -z "$ipv4" ] && echo "\033[0;31mPlease point your domain ("$domain") to your server's ipv4 address." && exit 1
-ipv6=$(host "$domain" | grep "IPv6" | awk '{print $NF}')
-[ -z "$ipv6" ] && echo "\033[0;31mPlease point your domain ("$domain") to your server's ipv6 address." && exit 1
+echo "Checking DNS records..."
+ipv4=$(host "$domain" | grep -m1 -Eo '([0-9]+\.){3}[0-9]+' | tr -d '[:space:]')
+[ -z "$ipv4" ] && echo "\033[0;31mPlease point your domain ($domain) to your server's ipv4 address." && exit 1
+ipv6=$(host "$domain" | grep "IPv6" | awk '{print $NF}' | tr -d '[:space:]')
+[ -z "$ipv6" ] && echo "\033[0;31mPlease point your domain ($domain) to your server's ipv6 address." && exit 1
 
-# Open required mail ports
+echo "Opening required mail ports..."
 for port in 80 993 465 25 587 110 995; do
 	ufw allow "$port" 2>/dev/null
 done
 
 if [ "$selfsigned" = "yes" ]; then
+	echo "Generating self-signed certificate..."
+	mkdir -p "$certdir"
+	chmod 700 "$certdir"
 	rm -f $certdir/privkey.pem
 	rm -f $certdir/csr.pem
 	rm -f $certdir/fullchain.pem
@@ -81,12 +101,11 @@ if [ "$selfsigned" = "yes" ]; then
 	fi
 	openssl req -x509 -days 36500 -key $certdir/privkey.pem -in $certdir/csr.pem -out $certdir/fullchain.pem
 else
-
-	# Open port 80 for Certbot.
+	echo "Obtaining Let's Encrypt certificate..."
 	ufw allow 80 2>/dev/null
 
 	[ ! -d "$certdir" ] &&
-		possiblecert="$(certbot certificates 2>/dev/null | grep "Domains:\.* \(\*\.$domain\|$maildomain\)\(\s\|$\)" -A 2 | awk '/Certificate Path/ {print $3}' | head -n1)" &&
+		possiblecert="$(certbot certificates 2>/dev/null | grep "Domains:\.* \(\*\.$domain\|$maildomain\)\(\s\|$\)" -A 2 | awk '/Certificate Path/ {print $3}' | head -n1 | tr -d '[:space:]')" &&
 		certdir="${possiblecert%/*}"
 
 	[ ! -d "$certdir" ] &&
@@ -105,7 +124,6 @@ else
 			certbot -d "$maildomain" certonly --standalone --register-unsafely-without-email --agree-tos
 			;;
 	esac
-
 fi
 
 [ ! -f "$certdir/fullchain.pem" ] && echo "Error locating or installing SSL certificate." && exit 1
@@ -181,9 +199,8 @@ echo "/^Received:.*/     IGNORE
 
 # Create a login map file that ensures that if a sender wants to send a mail from a user at our local
 # domain, they must be authenticated as that user
-echo "/^(.*)@$(sh -c "echo $domain | sed 's/\./\\\./'")$/   \${1}" > /etc/postfix/login_maps.pcre
+echo "/^(.*)@$(echo "$domain" | sed 's/\./\\\./')$/   \${1}" > /etc/postfix/login_maps.pcre
 
-# master.cf
 echo "Configuring Postfix's master.cf..."
 
 sed -i '/^\s*-o/d;/^\s*submission/d;/^\s*smtp/d' /etc/postfix/master.cf
@@ -207,14 +224,14 @@ smtps     inet  n       -       y       -       -       smtpd
 spamassassin unix -     n       n       -       -       pipe
   user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f \${sender} \${recipient}" >> /etc/postfix/master.cf
 
+echo "Creating Dovecot config..."
+
 # By default, dovecot has a bunch of configs in /etc/dovecot/conf.d/ These
 # files have nice documentation if you want to read it, but it's a huge pain to
 # go through them to organize.  Instead, we simply overwrite
 # /etc/dovecot/dovecot.conf because it's easier to manage. You can get a backup
 # of the original in /usr/share/dovecot if you want.
 mv /etc/dovecot/dovecot.conf /etc/dovecot/dovecot.backup.conf
-
-echo "Creating Dovecot config..."
 
 echo "# Dovecot config
 # Note that in the dovecot conf, you can use:
@@ -323,7 +340,7 @@ grep -q nullok /etc/pam.d/dovecot ||
 echo 'auth    required        pam_unix.so nullok
 account required        pam_unix.so' >> /etc/pam.d/dovecot
 
-# OpenDKIM
+echo "Generating OpenDKIM keys..."
 
 # A lot of the big name email services, like Google, will automatically reject
 # as spam unfamiliar and unauthenticated email addresses. As in, the server
@@ -339,6 +356,8 @@ mkdir -p "/etc/postfix/dkim/$domain"
 opendkim-genkey -D "/etc/postfix/dkim/$domain" -d "$domain" -s "$subdom"
 chgrp -R opendkim /etc/postfix/dkim/*
 chmod -R g+r /etc/postfix/dkim/*
+
+echo "Configuring OpenDKIM..."
 
 # Generate the OpenDKIM info:
 echo 'Configuring OpenDKIM...'
@@ -366,6 +385,8 @@ grep -q '^Socket\s*inet:12301@localhost' /etc/opendkim.conf || echo 'Socket inet
 # OpenDKIM daemon settings, removing previously activated socket.
 sed -i '/^SOCKET/d' /etc/default/opendkim && echo "SOCKET=\"inet:12301@localhost\"" >> /etc/default/opendkim
 
+echo "Configuring Postfix with OpenDKIM settings..."
+
 # Here we add to postconf the needed settings for working with OpenDKIM
 echo 'Configuring Postfix with OpenDKIM settings...'
 postconf -e 'smtpd_sasl_security_options = noanonymous, noplaintext'
@@ -385,6 +406,8 @@ postconf -e 'smtpd_forbid_bare_newline_exclusions = $mynetworks'
 /lib/opendkim/opendkim.service.generate
 systemctl daemon-reload
 
+echo "Enabling fail2ban security for dovecot and postfix..."
+
 # Enable fail2ban security for dovecot and postfix.
 [ ! -f /etc/fail2ban/jail.d/emailwiz.local ] && echo "[postfix]
 enabled = true
@@ -396,6 +419,8 @@ enabled = true
 enabled = true" > /etc/fail2ban/jail.d/emailwiz.local
 
 sed -i "s|^backend = auto$|backend = systemd|" /etc/fail2ban/jail.conf
+
+echo "Enabling SpamAssassin update cronjob..."
 
 # Enable SpamAssassin update cronjob.
 if [ -f /etc/default/spamassassin ]
@@ -414,12 +439,14 @@ else
 	printf "!!! Neither /etc/default/spamassassin or /etc/default/spamd exists, this is unexpected and needs to be investigated"
 fi
 
+echo "Restarting services..."
 for x in opendkim dovecot postfix fail2ban; do
 	printf "Restarting %s..." "$x"
 	service "$x" restart && printf " ...done\\n"
 	systemctl enable "$x"
 done
 
+echo "Generating DNS entries..."
 pval="$(tr -d '\n' <"/etc/postfix/dkim/$domain/$subdom.txt" | sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" | grep -o 'p=.*')"
 dkimentry="$subdom._domainkey.$domain	TXT	v=DKIM1; k=rsa; $pval"
 dmarcentry="_dmarc.$domain	TXT	v=DMARC1; p=reject; rua=mailto:postmaster@$domain; fo=1"
@@ -428,14 +455,14 @@ mxentry="$domain	MX	10	$maildomain	300"
 
 useradd -m -G mail postmaster
 
-# Create a cronjob that deletes month-old postmaster mails:
+echo "Creating cronjob to delete month-old postmaster mails..."
 cat <<EOF > /etc/cron.weekly/postmaster-clean
 #!/bin/sh
 
 find /home/postmaster/Mail -type f -mtime +30 -name '*.mail*' -delete >/dev/null 2>&1
 exit 0
 EOF
-chmod 755 /etc/cron.weekly/postmaster-clean
+chmod 700 /etc/cron.weekly/postmaster-clean
 
 grep -q '^deploy-hook = echo "$RENEWED_DOMAINS" | grep -q' /etc/letsencrypt/cli.ini ||
 	echo "
