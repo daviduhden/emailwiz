@@ -1,72 +1,43 @@
-# Email server setup script
+# Email Server Setup Script
 
-This script installs an email server with all the features required in the
-modern web.
+This script installs a fully-featured email server suitable for modern web use. Any contribution is highly appreciated.
 
-I've linked this file on Github to a shorter, more memorable address on my
-website so you can get it on your machine with this short command:
+When prompted by a dialog menu at the beginning, select "Internet Site" and enter your full domain without any subdomain, e.g., `uhden.dev`.
 
-```sh
-curl -LO lukesmith.xyz/emailwiz.sh
-```
+## This Script Installs
 
-When prompted by a dialog menu at the beginning, select "Internet Site", then
-give your full domain without any subdomain, e.g. `lukesmith.xyz`.
+- **Postfix** for sending and receiving mail.
+- **Dovecot** for retrieving mail to your email client (e.g., mutt, Thunderbird).
+- Configuration files that securely link Postfix and Dovecot with native PAM logins.
+- **Spamassassin** to prevent spam and allow custom filters.
+- **OpenDKIM** to validate your emails so you can send to Gmail and other major providers.
+- **Certbot** for SSL certificates, if not already present.
+- **fail2ban** to enhance server security, with enabled modules for the above programs.
 
-I'm glad to say that dozens, hundreds of people have now used it and there is a
-sizeable network of people with email servers thanks to this script.
+## This Script Does _Not_...
 
-## This script installs
-
-- **Postfix** to send and receive mail.
-- **Dovecot** to get mail to your email client (mutt, Thunderbird, etc.).
-- Config files that link the two above securely with native PAM log-ins.
-- **Spamassassin** to prevent spam and allow you to make custom filters.
-- **OpenDKIM** to validate you so you can send to Gmail and other big sites.
-- **Certbot** SSL certificates, if not already present.
-- **fail2ban** to increase server security, with enabled modules for the above
-  programs.
-
-## This script does _not_...
-
-- use a SQL database or anything like that. We keep it simple and use normal
-  Unix system users for accounts and passwords.
-- set up a graphical web interface for mail like Roundcube or Squirrel Mail.
-  You are expected to use a normal mail client like Thunderbird or K-9 for
-  Android or good old mutt with
-  [mutt-wizard](https://github.com/lukesmithxyz/mutt-wizard). Note that there
-  is a guide for [Rainloop](https://landchad.net/rainloop/) on
-  [LandChad.net](https://landchad.net) for those that want such a web
-  interface.
+- Use a SQL database or similar. It keeps things simple by using standard Unix system users for accounts and passwords.
+- Set up a graphical web interface for mail like Roundcube or Squirrel Mail. You are expected to use a standard mail client like Thunderbird, Claws Mail or Mutt.
 
 ## Prerequisites for Installation
 
-1. Debian or Ubuntu server.
-2. DNS records that point at least your domain's `mail.` subdomain to your
-   server's IP (IPv4 and IPv6). This is required on initial run for certbot to
-   get an SSL certificate for your `mail.` subdomain.
+1. A Debian or Ubuntu server.
+2. DNS records that point at least your domain's `mail.` subdomain to your server's IP (IPv4 and IPv6). This is required on the initial run for Certbot to obtain an SSL certificate for your `mail.` subdomain.
 
 ## Mandatory Finishing Touches
 
-### Unblock your ports
+### Unblock Your Ports
 
-While the script enables your mail ports on your server, it is common practice
-for all VPS providers to block mail ports on their end by default. Open a help
-ticket with your VPS provider asking them to open your mail ports and they will
-do it in short order.
+While the script enables your mail ports on your server, it is common practice for VPS providers to block mail ports by default. Open a help ticket with your VPS provider asking them to open your mail ports, and they will do so promptly.
 
-### DNS records
+### DNS Records
 
-At the end of the script, you will be given some DNS records to add to your DNS
-server/registrar's website. These are mostly for authenticating your emails as
-non-spam. The 4 records are:
+At the end of the script, you will be given some DNS records to add to your DNS server or registrar's website. These records are primarily for authenticating your emails as non-spam. The four records are:
 
 1. An MX record directing to `mail.yourdomain.tld`.
 2. A TXT record for SPF (to reduce mail spoofing).
 3. A TXT record for DMARC policies.
-4. A TXT record with your public DKIM key. This record is long and **uniquely
-   generated** while running `emailwiz.sh` and thus must be added after
-   installation.
+4. A TXT record with your public DKIM key. This record is long and **uniquely generated** while running `emailwiz.sh` and must be added after installation.
 
 They will look something like this:
 
@@ -77,53 +48,45 @@ _dmarc.example.org     TXT     v=DMARC1; p=reject; rua=mailto:dmarc@example.org;
 example.org    TXT     v=spf1 mx a: -all
 ```
 
-The script will create a file, `~/dns_emailwiz` that will list our the records
-for your convenience, and also prints them at the end of the script.
+The script will create a file, `~/dns_emailwiz`, that lists the records for your convenience and also prints them at the end of the script.
 
-### Add a rDNS/PTR record as well!
+### Add a rDNS/PTR Record as Well!
 
-Set a reverse DNS or PTR record to avoid getting spammed. You can do this at
-your VPS provider, and should set it to `mail.yourdomain.tld`. Note that you
-should set this for both IPv4 and IPv6.
+Set a reverse DNS or PTR record to avoid getting marked as spam. You can do this at your VPS provider, and it should be set to `mail.yourdomain.tld`. Note that you should set this for both IPv4 and IPv6.
 
-## Making new users/mail accounts
+## Creating New Users/Mail Accounts
 
-Let's say we want to add a user Billy and let him receive mail, run this:
+To add a user named Billy and allow him to receive mail, run:
 
 ```
 useradd -m -G mail billy
 passwd billy
 ```
 
-Any user added to the `mail` group will be able to receive mail. Suppose a user
-Cassie already exists and we want to let her receive mail too. Just run:
+Any user added to the `mail` group will be able to receive mail. If a user named Cassie already exists and you want to allow her to receive mail, run:
 
 ```
 usermod -a -G mail cassie
 ```
 
-A user's mail will appear in `~/Mail/`. If you want to see your mail while ssh'd
-in the server, you could just install mutt, add `set spoolfile="+Inbox"` to
-your `~/.muttrc` and use mutt to view and reply to mail. You'll probably want
-to log in remotely though:
+A user's mail will appear in `~/Mail/`. If you want to see your mail while SSH'd into the server, you could install mutt, add `set spoolfile="+Inbox"` to your `~/.muttrc`, and use mutt to view and reply to mail. However, you'll probably want to log in remotely:
 
-## Logging in from email clients (Thunderbird/mutt/etc)
+## Logging in from Email Clients (Thunderbird/mutt/etc.)
 
-Let's say you want to access your mail with Thunderbird or mutt or another
-email program. For my domain, the server information will be as follows:
+To access your mail with Thunderbird, mutt, or another email program, use the following server information for your domain:
 
-- SMTP server: `mail.lukesmith.xyz`
+- SMTP server: `mail.uhden.dev`
 - SMTP port: 465
-- IMAP server: `mail.lukesmith.xyz`
+- IMAP server: `mail.uhden.dev`
 - IMAP port: 993
 
-## MTA-STS and DANE for improved security
+## MTA-STS and DANE for Improved Security
 
 ### MTA-STS
 
-By its very nature SMTP does not offer built-in security against man-in-the-middle attacks. To mitigate this risk, you can implement the MTA-STS policy, which instructs compatible senders to employ verified TLS encryption when communicating with your server.
+SMTP does not offer built-in security against man-in-the-middle attacks. To mitigate this risk, you can implement the MTA-STS policy, which instructs compatible senders to use verified TLS encryption when communicating with your server.
 
-To put this into practice, create a file named mta-sts.txt with the specified content and host it at `https://mta-sts.example.org/.well-known/`:
+To implement this, create a file named `mta-sts.txt` with the following content and host it at `https://mta-sts.example.org/.well-known/`:
 
 ```
 version: STSv1
@@ -132,19 +95,20 @@ max_age: 604800
 mx: mail.example.org
 ```
 
-After that you need to add the following DNS records:
+Then, add the following DNS records:
 
 ```
 _mta-sts.example.org.   TXT    "v=STSv1; id=<id>"
 _smtp._tls.example.org. TXT    "v=TLSRPTv1;rua=mailto:postmaster@example.org"
 ```
-`<id>` can be an arbitrary number but it's recommended to use the current unix timestamp (`date +%s`)
+`<id>` can be an arbitrary number, but it's recommended to use the current Unix timestamp (`date +%s`).
 
 ### DANE
 
 It's also recommended to set up a TLSA (DNSSEC/DANE) record for further security enhancement. Go [here](https://ssl-tools.net/tlsa-generator) to generate a TLSA record. Set the port to 25, Transport Protocol to "tcp", and specify the MX hostname as the Domain Name.
 
-After adding the TLSA DNS record you need to enable opportunistic DANE in postfix by doing the following:
+After adding the TLSA DNS record, enable opportunistic DANE in Postfix by doing the following:
+
 ```
 postconf -e 'smtpd_use_tls = yes'
 postconf -e 'smtp_dns_support_level = dnssec'
@@ -154,14 +118,6 @@ echo "dane       unix  -       -       n       -       -       smtp
   -o smtp_dns_support_level=dnssec
   -o smtp_tls_security_level=dane" >> /etc/postfix/master.cf
 ```
-
-## Benefited from this?
-
-I am always glad to hear this script is still making life easy for people. If
-this script or documentation has saved you some frustration, donate here:
-
-- btc: `bc1qzw6mk80t3vrp2cugmgfjqgtgzhldrqac5axfh4`
-- xmr: `8A5v4Ci11Lz7BDoE2z2oPqMoNHzr5Zj8B3Q2N2qzqrUKhAKgNQYGSSaZDnBUWg6iXCiZyvC9mVCyGj5kGMJTi1zGKGM4Trm`
 
 ## Sites for Troubleshooting
 
