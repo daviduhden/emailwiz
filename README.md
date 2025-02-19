@@ -7,7 +7,7 @@ When prompted by a dialog menu at the beginning, select "Internet Site" and ente
 ## This Script Installs
 
 - **Postfix** for sending and receiving mail.
-- **Dovecot** for retrieving mail to your email client (e.g., mutt, Thunderbird).
+- **Dovecot** for retrieving mail to your email client.
 - Configuration files that securely link Postfix and Dovecot with native PAM logins.
 - **Spamassassin** to prevent spam and allow custom filters.
 - **OpenDKIM** to validate your emails so you can send to Gmail and other major providers.
