@@ -595,21 +595,25 @@ and how to log in.\n"
 }
 
 # Main script execution
-check_root
-confirm_installation
-install_packages
+main() {
+	check_root
+	confirm_installation
+	install_packages
 
-domain="$(hostname --domain | tr -d '[:space:]')"
-subdom=${MAIL_SUBDOM:-mail}
-maildomain="$subdom.$domain"
+	domain="$(hostname --domain | tr -d '[:space:]')"
+	subdom=${MAIL_SUBDOM:-mail}
+	maildomain="$subdom.$domain"
 
-configure_ssl "$domain" "$subdom"
-configure_postfix "$domain" "$subdom"
-configure_dovecot "$domain" "$subdom"
-configure_opendkim "$domain" "$subdom"
-configure_fail2ban
-configure_spamassassin
-restart_services
-create_cronjob
-generate_dns_entries "$domain" "$subdom"
-final_output_message "$dkimentry" "$dmarcentry" "$spfentry" "$mxentry"
+	configure_ssl "$domain" "$subdom"
+	configure_postfix "$domain" "$subdom"
+	configure_dovecot "$domain" "$subdom"
+	configure_opendkim "$domain" "$subdom"
+	configure_fail2ban
+	configure_spamassassin
+	restart_services
+	create_cronjob
+	generate_dns_entries "$domain" "$subdom"
+	final_output_message "$dkimentry" "$dmarcentry" "$spfentry" "$mxentry"
+}
+
+main "$@"

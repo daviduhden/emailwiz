@@ -19,13 +19,14 @@
 
 set -euo pipefail
 
+# Function to ensure the script is run as root
 ensure_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        echo "This script must be run as root. Please run it again with 'sudo' or as the root user."
         exit 1
     fi
 }
 
+# Function to validate input parameters
 validate_input() {
     if [ "$#" -ne 2 ]; then
         cat <<EOF
@@ -45,6 +46,7 @@ EOF
     fi
 }
 
+# Function to add new domain to Postfix configuration
 add_domain_to_postfix() {
     local new_domain="$1"
     echo "Adding the new domain to the valid Postfix addresses..."
@@ -53,6 +55,7 @@ add_domain_to_postfix() {
     fi
 }
 
+# Function to create DKIM for the new domain
 create_dkim() {
     local new_domain="$1"
     local subdom="mail"
@@ -63,6 +66,7 @@ create_dkim() {
     chmod -R g+r /etc/postfix/dkim/*
 }
 
+# Function to update DKIM tables
 update_dkim_tables() {
     local new_domain="$1"
     local subdom="mail"
@@ -71,11 +75,13 @@ update_dkim_tables() {
     echo "*@$new_domain $subdom._domainkey.$new_domain" >> /etc/postfix/dkim/signingtable
 }
 
+# Function to reload services
 reload_services() {
     echo "Reloading OpenDKIM and Postfix services..."
     systemctl reload opendkim postfix
 }
 
+# Function to generate DNS entries for the new domain
 generate_dns_entries() {
     local new_domain="$1"
     local mail_service_domain="$2"
@@ -110,6 +116,7 @@ EOF
     echo "They have also been stored in $HOME/dns_emailwizard_added"
 }
 
+# Main script execution
 main() {
     ensure_root
     validate_input "$@"
