@@ -1,6 +1,6 @@
 # Email Server Setup Script
 
-This script installs a fully functional email server on a Debian or Ubuntu server that is suitable for modern internet use. Any contribution is highly appreciated.
+This script installs a fully functional email server that is suitable for modern internet use. Any contribution is highly appreciated.
 
 I've linked this file on Github to a shorter, more memorable address on my LARBS.xyz domain, so you can get it on your machine with this short command:
 
