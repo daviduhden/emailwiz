@@ -1,6 +1,6 @@
 # Email Server Setup Script
 
-This script installs a fully functional email server on a Debian or Ubuntu server that is suitable for modern internet use. Any contribution is highly appreciated.
+This script installs a fully functional email server that is suitable for modern internet use. Any contribution is highly appreciated.
 
 When prompted by a dialog menu at the beginning, select "Internet Site" and enter your full domain without any subdomain, e.g., `uhden.dev`.
 
