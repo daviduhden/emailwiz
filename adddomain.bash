@@ -20,10 +20,11 @@
 set -euo pipefail
 
 # Function to ensure the script is run as root
-ensure_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        exit 1
-    fi
+check_root() {
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "This script must be run as root. Please run it again with 'sudo' or as the root user."
+		exit 1
+	fi
 }
 
 # Function to validate input parameters
