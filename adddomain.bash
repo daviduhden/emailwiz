@@ -22,6 +22,9 @@ set -euo pipefail
 cat <<EOF
 This script adds a new domain to the email server configuration.
 Usage: ./adddomain.sh <new_domain> <mail_service_domain>
+
+<new_domain>: The new domain you want to add.
+<mail_service_domain>: The existing mail service domain.
 EOF
 
 read -p "Have you read and understood the above instructions? (yes/no): " response
