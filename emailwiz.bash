@@ -572,7 +572,6 @@ final_output_message() {
 |  \| |/ _ \ \ /\ / (_)
 | |\  | (_) \ V  V / _
 |_| \_|\___/ \_/\_/ (_)\033[0m
-EOF
 
 Add these three records to your DNS TXT records on either your registrar's site
 or your DNS server:
@@ -591,7 +590,8 @@ inputting them in a registrar's web interface.
 Also, these are now saved to \033[34m~/dns_emailwizard\033[0m in case you want them in a file.
 
 Once you do that, you're done! Check the README for how to add users/accounts
-and how to log in.\n"
+and how to log in.
+EOF
 }
 
 # Main script execution
