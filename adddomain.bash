@@ -1,5 +1,11 @@
 #!/bin/bash
 
+if [[ -z "${ZSH_VERSION:-}" ]] && command -v zsh >/dev/null 2>&1; then
+    exec zsh "$0" "$@"
+fi
+
+set -euo pipefail
+
 # Email Server Add Domain Script
 # Copyright (C) 2019-2024 Luke Smith
 # Copyright (C) 2025 David Uhden Collado
@@ -17,7 +23,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-set -euo pipefail
+# Simple colored logging
+if [[ -t 1 && "${NO_COLOR:-}" != "1" ]]; then
+    GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; RESET="\033[0m"
+else
+    GREEN=""; YELLOW=""; RED=""; RESET=""
+fi
+
+log()    { printf '%s %b[INFO]%b ✅ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"; }
+warn()   { printf '%s %b[WARN]%b ⚠️ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2; }
+error()  { printf '%s %b[ERROR]%b ❌ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2; }
 
 # Function to ensure the script is run as root
 check_root() {
