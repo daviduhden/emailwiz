@@ -1,7 +1,7 @@
 #!/bin/bash
 
-if [[ -z "${ZSH_VERSION:-}" ]] && command -v zsh >/dev/null 2>&1; then
-    exec zsh "$0" "$@"
+if [[ -z ${ZSH_VERSION:-} ]] && command -v zsh >/dev/null 2>&1; then
+	exec zsh "$0" "$@"
 fi
 
 set -euo pipefail
@@ -24,15 +24,21 @@ set -euo pipefail
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Simple colored logging
-if [[ -t 1 && "${NO_COLOR:-}" != "1" ]]; then
-    GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; RESET="\033[0m"
+if [[ -t 1 && ${NO_COLOR:-} != "1" ]]; then
+	GREEN="\033[32m"
+	YELLOW="\033[33m"
+	RED="\033[31m"
+	RESET="\033[0m"
 else
-    GREEN=""; YELLOW=""; RED=""; RESET=""
+	GREEN=""
+	YELLOW=""
+	RED=""
+	RESET=""
 fi
 
-log()    { printf '%s %b[INFO]%b ✅ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"; }
-warn()   { printf '%s %b[WARN]%b ⚠️ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2; }
-error()  { printf '%s %b[ERROR]%b ❌ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2; }
+log() { printf '%s %b[INFO]%b ✅ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"; }
+warn() { printf '%s %b[WARN]%b ⚠️ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2; }
+error() { printf '%s %b[ERROR]%b ❌ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2; }
 
 # Function to ensure the script is run as root
 check_root() {
@@ -44,105 +50,106 @@ check_root() {
 
 # Function to validate input parameters
 validate_input() {
-    if [ "$#" -ne 2 ]; then
-        cat <<EOF
+	if [ "$#" -ne 2 ]; then
+		cat <<EOF
 This script adds a new domain to the email server configuration.
 Usage: ./adddomain.sh <new_domain> <mail_service_domain>
 
 <new_domain>: The new domain you want to add.
 <mail_service_domain>: The existing mail service domain.
 EOF
-        exit 1
-    fi
+		exit 1
+	fi
 
-    read -p "Have you read and understood the above instructions? (yes/no): " response
-    if [ "$response" != "yes" ]; then
-        echo "Please read the instructions carefully before proceeding."
-        exit 1
-    fi
+	read -r -p "Have you read and understood the above instructions? (yes/no): " response
+	if [ "$response" != "yes" ]; then
+		error "Please read the instructions carefully before proceeding."
+		exit 1
+	fi
 }
 
 # Function to add new domain to Postfix configuration
 add_domain_to_postfix() {
-    local new_domain="$1"
-    echo "Adding the new domain to the valid Postfix addresses..."
-    if ! grep -q "^mydestination.*$new_domain" /etc/postfix/main.cf; then
-        sed -i "/^mydestination/s/$/, $new_domain/" /etc/postfix/main.cf
-    fi
+	local new_domain="$1"
+	log "Adding the new domain to the valid Postfix addresses..."
+	if ! grep -q "^mydestination.*$new_domain" /etc/postfix/main.cf; then
+		sed -i "/^mydestination/s/$/, $new_domain/" /etc/postfix/main.cf
+	fi
 }
 
 # Function to create DKIM for the new domain
 create_dkim() {
-    local new_domain="$1"
-    local subdom="mail"
-    echo "Creating DKIM for the new domain..."
-    mkdir -p "/etc/postfix/dkim/$new_domain"
-    opendkim-genkey -D "/etc/postfix/dkim/$new_domain" -d "$new_domain" -s "$subdom"
-    chgrp -R opendkim /etc/postfix/dkim/*
-    chmod -R g+r /etc/postfix/dkim/*
+	local new_domain="$1"
+	local subdom="mail"
+	log "Creating DKIM for the new domain..."
+	mkdir -p "/etc/postfix/dkim/$new_domain"
+	opendkim-genkey -D "/etc/postfix/dkim/$new_domain" -d "$new_domain" -s "$subdom"
+	chgrp -R opendkim /etc/postfix/dkim/*
+	chmod -R g+r /etc/postfix/dkim/*
 }
 
 # Function to update DKIM tables
 update_dkim_tables() {
-    local new_domain="$1"
-    local subdom="mail"
-    echo "Adding entries to keytable and signing table..."
-    echo "$subdom._domainkey.$new_domain $new_domain:$subdom:/etc/postfix/dkim/$new_domain/$subdom.private" >> /etc/postfix/dkim/keytable
-    echo "*@$new_domain $subdom._domainkey.$new_domain" >> /etc/postfix/dkim/signingtable
+	local new_domain="$1"
+	local subdom="mail"
+	log "Adding entries to keytable and signing table..."
+	echo "$subdom._domainkey.$new_domain $new_domain:$subdom:/etc/postfix/dkim/$new_domain/$subdom.private" >>/etc/postfix/dkim/keytable
+	echo "*@$new_domain $subdom._domainkey.$new_domain" >>/etc/postfix/dkim/signingtable
 }
 
 # Function to reload services
 reload_services() {
-    echo "Reloading OpenDKIM and Postfix services..."
-    systemctl reload opendkim postfix
+	log "Reloading OpenDKIM and Postfix services..."
+	systemctl reload opendkim postfix
 }
 
 # Function to generate DNS entries for the new domain
 generate_dns_entries() {
-    local new_domain="$1"
-    local mail_service_domain="$2"
-    local subdom="mail"
-    local maildomain="$subdom.$mail_service_domain"
+	local new_domain="$1"
+	local mail_service_domain="$2"
+	local subdom="mail"
+	local maildomain="$subdom.$mail_service_domain"
 
-    echo "Generating DKIM TXT entry..."
-    pval=$(sed -e '1d' -e ':a' -e 'N' -e '$!ba' -e 's/\n//g' "/etc/postfix/dkim/$new_domain/$subdom.txt" \
-        | sed -e "s/k=rsa.* \"p=/k=rsa; p=/" \
-              -e "s/\"\s*).*//" \
-        | grep -o 'p=.*')
+	log "Generating DKIM TXT entry..."
+	local pval
+	pval=$(sed -e '1d' -e ':a' -e 'N' -e '$!ba' -e 's/\n//g' "/etc/postfix/dkim/$new_domain/$subdom.txt" |
+		sed -e 's/k=rsa.* "p=/k=rsa; p=/' \
+			-e "s/\"\s*).*//" |
+		grep -o 'p=.*')
 
-    local dkimentry="$subdom._domainkey.$new_domain	TXT	v=DKIM1; k=rsa; $pval"
-    local dmarcentry="_dmarc.$new_domain	TXT	v=DMARC1; p=reject; rua=mailto:dmarc@$new_domain; fo=1"
-    local spfentry="$new_domain	TXT	v=spf1 mx a:$maildomain -all"
-    local mxentry="$new_domain	MX	10	$maildomain"
+	local dkimentry="$subdom._domainkey.$new_domain	TXT	v=DKIM1; k=rsa; $pval"
+	local dmarcentry="_dmarc.$new_domain	TXT	v=DMARC1; p=reject; rua=mailto:dmarc@$new_domain; fo=1"
+	local spfentry="$new_domain	TXT	v=spf1 mx a:$maildomain -all"
+	local mxentry="$new_domain	MX	10	$maildomain"
 
-    cat <<EOF >> "$HOME/dns_emailwizard_added"
+	cat <<EOF >>"$HOME/dns_emailwizard_added"
 $dkimentry
 $dmarcentry
 $spfentry
 $mxentry
 EOF
 
-    echo "=== ADD THE FOLLOWING TO YOUR DNS TXT RECORDS ==="
-    cat <<EOF
+	echo "=== ADD THE FOLLOWING TO YOUR DNS TXT RECORDS ==="
+	cat <<EOF
 $dkimentry
 $dmarcentry
 $spfentry
 $mxentry
 EOF
-    echo "They have also been stored in $HOME/dns_emailwizard_added"
+	echo "They have also been stored in $HOME/dns_emailwizard_added"
 }
 
 # Main script execution
 main() {
-    ensure_root
-    validate_input "$@"
-    local new_domain="$1"
-    local mail_service_domain="$2"
-    add_domain_to_postfix "$new_domain"
-    create_dkim "$new_domain"
-    update_dkim_tables "$new_domain"
-    reload_services
-    generate_dns_entries "$new_domain" "$mail_service_domain"
+	check_root
+	validate_input "$@"
+	local new_domain="$1"
+	local mail_service_domain="$2"
+	add_domain_to_postfix "$new_domain"
+	create_dkim "$new_domain"
+	update_dkim_tables "$new_domain"
+	reload_services
+	generate_dns_entries "$new_domain" "$mail_service_domain"
 }
 
 main "$@"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [[ -z "${ZSH_VERSION:-}" ]] && command -v zsh >/dev/null 2>&1; then
+if [[ -z ${ZSH_VERSION:-} ]] && command -v zsh >/dev/null 2>&1; then
 	exec zsh "$0" "$@"
 fi
 
@@ -27,20 +27,26 @@ set -euo pipefail
 # treat unset variables as an error, and prevent errors in a pipeline from being masked.
 
 # Simple colored logging
-if [[ -t 1 && "${NO_COLOR:-}" != "1" ]]; then
-	GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; RESET="\033[0m"
+if [[ -t 1 && ${NO_COLOR:-} != "1" ]]; then
+	GREEN="\033[32m"
+	YELLOW="\033[33m"
+	RED="\033[31m"
+	RESET="\033[0m"
 else
-	GREEN=""; YELLOW=""; RED=""; RESET=""
+	GREEN=""
+	YELLOW=""
+	RED=""
+	RESET=""
 fi
 
-log()    { printf '%s %b[INFO]%b ✅ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"; }
-warn()   { printf '%s %b[WARN]%b ⚠️ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2; }
-error()  { printf '%s %b[ERROR]%b ❌ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2; }
+log() { printf '%s %b[INFO]%b ✅ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"; }
+warn() { printf '%s %b[WARN]%b ⚠️ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2; }
+error() { printf '%s %b[ERROR]%b ❌ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2; }
 
 # Function to ensure the script is run as root
 check_root() {
 	if [ "$(id -u)" -ne 0 ]; then
-		echo "This script must be run as root. Please run it again with 'sudo' or as the root user."
+		error "This script must be run as root. Please run it again with 'sudo' or as the root user."
 		exit 1
 	fi
 }
@@ -64,9 +70,9 @@ More DNS records will be given to you to install. One of them will be
 different for every installation and is uniquely generated on your machine.
 EOF
 
-	read -p "Have you read and understood the above instructions regarding the installation and configuration of the email server? (yes/no): " response
+	read -r -p "Have you read and understood the above instructions regarding the installation and configuration of the email server? (yes/no): " response
 	if [ "$response" != "yes" ]; then
-		echo "Please read the instructions carefully before proceeding."
+		error "Please read the instructions carefully before proceeding."
 		exit 1
 	fi
 }
@@ -74,16 +80,15 @@ EOF
 # Function to install required packages
 install_packages() {
 	umask 0022
-	local packages="postfix postfix-pcre dovecot-imapd dovecot-pop3d dovecot-sieve opendkim opendkim-tools spamassassin spamc net-tools fail2ban bind9-host"
-	echo "Stopping Dovecot and Postfix services..."
+	local packages=(postfix postfix-pcre dovecot-imapd dovecot-pop3d dovecot-sieve opendkim opendkim-tools spamassassin spamc net-tools fail2ban bind9-host)
+	log "Stopping Dovecot and Postfix services..."
 	systemctl -q stop dovecot
 	systemctl -q stop postfix
+	log "Purging existing packages..."
+	apt-get purge --auto-remove -y "${packages[@]}"
 
-	echo "Purging existing packages..."
-	apt-get purge --auto-remove -y $packages
-
-	echo "Installing required packages..."
-	apt-get install -y $packages
+	log "Installing required packages..."
+	apt-get install -y "${packages[@]}"
 }
 
 # Function to configure SSL certificates
@@ -97,10 +102,11 @@ configure_ssl() {
 	local country_name=""
 	local state_or_province_name=""
 	local organization_name=""
-	local common_name="$(hostname -f | tr -d '[:space:]')"
+	local common_name
+	common_name=$(hostname -f | tr -d '[:space:]')
 
 	if [ "$use_cert_config" = "yes" ]; then
-		echo "Creating certificate configuration..."
+		log "Creating certificate configuration..."
 		mkdir -p "$certdir"
 		chmod 700 "$certdir"
 		echo "[req]
@@ -112,44 +118,52 @@ configure_ssl() {
 	countryName             = $country_name
 	stateOrProvinceName     = $state_or_province_name
 	organizationName        = $organization_name
-	commonName              = $common_name " > "$certdir/certconfig.conf"
+	commonName              = $common_name " >"$certdir/certconfig.conf"
 	fi
 
-	echo "Checking DNS records..."
-	local ipv4=$(dig +short "$domain" | grep -m1 -Eo '([0-9]+\.){3}[0-9]+' | tr -d '[:space:]')
-	[ -z "$ipv4" ] && echo -e "\033[0;31mError: No IPv4 address found for the domain ($domain). Please ensure that your domain's DNS records are correctly configured to point to your server's IPv4 address.\033[0m" && exit 1
-	local ipv6=$(dig +short "$domain" AAAA | grep -m1 -Eo '([0-9a-fA-F:]+)' | tr -d '[:space:]')
-	[ -z "$ipv6" ] && echo -e "\033[0;31mError: No IPv6 address found for your domain ($domain). Please ensure that your DNS records include an AAAA record pointing to your server's IPv6 address.\033[0m" && exit 1
+	log "Checking DNS records..."
+	local ipv4
+	ipv4=$(dig +short "$domain" | grep -m1 -Eo '([0-9]+\.){3}[0-9]+' | tr -d '[:space:]')
+	[ -z "$ipv4" ] && {
+		error "No IPv4 address found for the domain ($domain). Please ensure that your domain's DNS records are correctly configured to point to your server's IPv4 address."
+		exit 1
+	}
+	local ipv6
+	ipv6=$(dig +short "$domain" AAAA | grep -m1 -Eo '([0-9a-fA-F:]+)' | tr -d '[:space:]')
+	[ -z "$ipv6" ] && {
+		error "No IPv6 address found for your domain ($domain). Please ensure that your DNS records include an AAAA record pointing to your server's IPv6 address."
+		exit 1
+	}
 
-	echo "Opening required mail ports..."
+	log "Opening required mail ports..."
 	if command -v ufw >/dev/null 2>&1; then
-		echo "Opening required mail ports with ufw..."
+		log "Opening required mail ports with ufw..."
 		ufw allow 80,993,465,25,587,110,995/tcp 2>/dev/null
 	else
-		echo "ufw not found, opening required mail ports with iptables..."
+		warn "ufw not found, opening required mail ports with iptables..."
 		iptables -A INPUT -p tcp -m multiport --dports 80,993,465,25,587,110,995 -j ACCEPT
 	fi
 
 	if [ "$selfsigned" = "yes" ]; then
-		echo "Generating self-signed certificate..."
+		log "Generating self-signed certificate..."
 		mkdir -p "$certdir"
 		chmod 700 "$certdir"
-		rm -f $certdir/privkey.pem
-		rm -f $certdir/csr.pem
-		rm -f $certdir/fullchain.pem
+		rm -f "$certdir/privkey.pem"
+		rm -f "$certdir/csr.pem"
+		rm -f "$certdir/fullchain.pem"
 
-		echo "Generating a 4096 rsa key and a self-signed certificate that lasts 100 years"
-		mkdir -p $certdir
-		openssl genrsa -out $certdir/privkey.pem 4096
+		log "Generating a 4096 rsa key and a self-signed certificate that lasts 100 years"
+		mkdir -p "$certdir"
+		openssl genrsa -out "$certdir/privkey.pem" 4096
 
 		if [ "$use_cert_config" = "yes" ]; then
-			openssl req -new -key $certdir/privkey.pem -out $certdir/csr.pem -config $certdir/certconfig.conf
+			openssl req -new -key "$certdir/privkey.pem" -out "$certdir/csr.pem" -config "$certdir/certconfig.conf"
 		else
-			openssl req -new -key $certdir/privkey.pem -out $certdir/csr.pem
+			openssl req -new -key "$certdir/privkey.pem" -out "$certdir/csr.pem"
 		fi
-		openssl req -x509 -days 36500 -key $certdir/privkey.pem -in $certdir/csr.pem -out $certdir/fullchain.pem
+		openssl req -x509 -days 36500 -key "$certdir/privkey.pem" -in "$certdir/csr.pem" -out "$certdir/fullchain.pem"
 	else
-		echo "Obtaining Let's Encrypt certificate..."
+		log "Obtaining Let's Encrypt certificate..."
 		ufw allow 80 2>/dev/null
 
 		[ ! -d "$certdir" ] &&
@@ -193,9 +207,9 @@ configure_postfix() {
 
 	# Adding additional vars to fix an issue with receiving emails (relay access denied) and adding it to mydestination.
 	postconf -e "myhostname = $maildomain"
-	postconf -e "mail_name = $domain"  #This is for the smtpd_banner
+	postconf -e "mail_name = $domain" #This is for the smtpd_banner
 	postconf -e "mydomain = $domain"
-	postconf -e 'mydestination = $myhostname, $mydomain, mail, localhost.localdomain, localhost, localhost.$mydomain'
+	postconf -e "mydestination = \$myhostname, \$mydomain, mail, localhost.localdomain, localhost, localhost.\$mydomain"
 
 	# Change the cert/key files to the default locations of the Let's Encrypt cert/key
 	postconf -e "smtpd_tls_key_file=$certdir/privkey.pem"
@@ -250,11 +264,11 @@ configure_postfix() {
 
 	# strips "Received From:" in sent emails
 	echo "/^Received:.*/     IGNORE
-	/^X-Originating-IP:/    IGNORE" >> /etc/postfix/header_checks
+	/^X-Originating-IP:/    IGNORE" >>/etc/postfix/header_checks
 
 	# Create a login map file that ensures that if a sender wants to send a mail from a user at our local
 	# domain, they must be authenticated as that user
-	echo "/^(.*)@$(echo "$domain" | sed 's/\./\\\./')$/   \${1}" > /etc/postfix/login_maps.pcre
+	echo "/^(.*)@${domain//./\.}$/   \${1}" >/etc/postfix/login_maps.pcre
 
 	echo "Configuring Postfix's master.cf..."
 
@@ -270,24 +284,26 @@ configure_postfix() {
 	/^\s*-o\s\+smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination/d
 	' /etc/postfix/master.cf
 
-	echo "smtp unix - - n - - smtp
-	smtp inet n - y - - smtpd
-		-o content_filter=spamassassin
-	submission inet n       -       y       -       -       smtpd
-		-o syslog_name=postfix/submission
-		-o smtpd_tls_security_level=encrypt
-		-o smtpd_tls_auth_only=yes
-		-o smtpd_enforce_tls=yes
-		-o smtpd_client_restrictions=permit_sasl_authenticated,reject
-		-o smtpd_sender_restrictions=reject_sender_login_mismatch
-		-o smtpd_sender_login_maps=pcre:/etc/postfix/login_maps.pcre
-		-o smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination
-	smtps     inet  n       -       y       -       -       smtpd
-		-o syslog_name=postfix/smtps
-		-o smtpd_tls_wrappermode=yes
-		-o smtpd_sasl_auth_enable=yes
-	spamassassin unix -     n       n       -       -       pipe
-		user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f \${sender} \${recipient}" >> /etc/postfix/master.cf
+	cat >>/etc/postfix/master.cf <<'EOF'
+smtp unix - - n - - smtp
+smtp inet n - y - - smtpd
+	-o content_filter=spamassassin
+submission inet n       -       y       -       -       smtpd
+	-o syslog_name=postfix/submission
+	-o smtpd_tls_security_level=encrypt
+	-o smtpd_tls_auth_only=yes
+	-o smtpd_enforce_tls=yes
+	-o smtpd_client_restrictions=permit_sasl_authenticated,reject
+	-o smtpd_sender_restrictions=reject_sender_login_mismatch
+	-o smtpd_sender_login_maps=pcre:/etc/postfix/login_maps.pcre
+	-o smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination
+smtps     inet  n       -       y       -       -       smtpd
+	-o syslog_name=postfix/smtps
+	-o smtpd_tls_wrappermode=yes
+	-o smtpd_sasl_auth_enable=yes
+spamassassin unix -     n       n       -       -       pipe
+	user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f ${sender} ${recipient}
+EOF
 }
 
 # Function to configure Dovecot
@@ -391,28 +407,28 @@ configure_dovecot() {
 		sieve_dir = ~/.sieve
 		sieve_global_dir = /var/lib/dovecot/sieve/
 	grep -q '^vmail:' /etc/passwd || useradd -r -m vmail || true
-	" > /etc/dovecot/dovecot.conf
+	" >/etc/dovecot/dovecot.conf
 
 	# If using an old version of Dovecot, remove the ssl_dl line.
 	case "$(dovecot --version)" in
-		1|2.1*|2.2*) sed -i '/^ssl_dh/d' /etc/dovecot/dovecot.conf ;;
+	1 | 2.1* | 2.2*) sed -i '/^ssl_dh/d' /etc/dovecot/dovecot.conf ;;
 	esac
 	grep -q '^vmail:' /etc/passwd || useradd -r -m vmail
 	mkdir -p /var/lib/dovecot/sieve/
 	chmod 700 /var/lib/dovecot/sieve/
 
-	echo "require [\"fileinto\", \"mailbox\"];
-	if header :contains \"X-Spam-Flag\" \"YES\"
+	echo 'require ["fileinto", "mailbox"];
+	if header :contains "X-Spam-Flag" "YES"
 		{
-			fileinto \"Junk\";
-		}" > /var/lib/dovecot/sieve/default.sieve
+			fileinto "Junk";
+		}' >/var/lib/dovecot/sieve/default.sieve
 
 	chown -R vmail:vmail /var/lib/dovecot
 	sievec /var/lib/dovecot/sieve/default.sieve
 
 	echo 'Preparing user authentication...'
-	grep -q 'auth    required        pam_unix.so nullok' /etc/pam.d/dovecot || echo 'auth    required        pam_unix.so nullok' >> /etc/pam.d/dovecot
-	grep -q 'account required        pam_unix.so' /etc/pam.d/dovecot || echo 'account required        pam_unix.so' >> /etc/pam.d/dovecot
+	grep -q 'auth    required        pam_unix.so nullok' /etc/pam.d/dovecot || echo 'auth    required        pam_unix.so nullok' >>/etc/pam.d/dovecot
+	grep -q 'account required        pam_unix.so' /etc/pam.d/dovecot || echo 'account required        pam_unix.so' >>/etc/pam.d/dovecot
 }
 
 # Function to configure OpenDKIM
@@ -442,28 +458,28 @@ configure_opendkim() {
 	# Generate the OpenDKIM info:
 	echo 'Configuring OpenDKIM...'
 	grep -q "$domain" /etc/postfix/dkim/keytable 2>/dev/null ||
-	echo "$subdom._domainkey.$domain $domain:$subdom:/etc/postfix/dkim/$domain/$subdom.private" >> /etc/postfix/dkim/keytable
+		echo "$subdom._domainkey.$domain $domain:$subdom:/etc/postfix/dkim/$domain/$subdom.private" >>/etc/postfix/dkim/keytable
 
 	grep -q "$domain" /etc/postfix/dkim/signingtable 2>/dev/null ||
-	echo "*@$domain $subdom._domainkey.$domain" >> /etc/postfix/dkim/signingtable
+		echo "*@$domain $subdom._domainkey.$domain" >>/etc/postfix/dkim/signingtable
 
 	grep -q '127.0.0.1' /etc/postfix/dkim/trustedhosts 2>/dev/null ||
 		echo '127.0.0.1
-	10.1.0.0/16' >> /etc/postfix/dkim/trustedhosts
+	10.1.0.0/16' >>/etc/postfix/dkim/trustedhosts
 
 	# ...and source it from opendkim.conf
 	grep -q '^KeyTable' /etc/opendkim.conf 2>/dev/null || echo 'KeyTable file:/etc/postfix/dkim/keytable
 	SigningTable refile:/etc/postfix/dkim/signingtable
-	InternalHosts refile:/etc/postfix/dkim/trustedhosts' >> /etc/opendkim.conf
+	InternalHosts refile:/etc/postfix/dkim/trustedhosts' >>/etc/opendkim.conf
 
 	sed -i '/^#Canonicalization/s/simple/relaxed\/simple/' /etc/opendkim.conf
 	sed -i '/^#Canonicalization/s/^#//' /etc/opendkim.conf
 
 	sed -i '/Socket/s/^#*/#/' /etc/opendkim.conf
-	grep -q '^Socket\s*inet:12301@localhost' /etc/opendkim.conf || echo 'Socket inet:12301@localhost' >> /etc/opendkim.conf
+	grep -q '^Socket\s*inet:12301@localhost' /etc/opendkim.conf || echo 'Socket inet:12301@localhost' >>/etc/opendkim.conf
 
 	# OpenDKIM daemon settings, removing previously activated socket.
-	sed -i '/^SOCKET/d' /etc/default/opendkim && echo "SOCKET=\"inet:12301@localhost\"" >> /etc/default/opendkim
+	sed -i '/^SOCKET/d' /etc/default/opendkim && echo 'SOCKET="inet:12301@localhost"' >>/etc/default/opendkim
 
 	echo "Configuring Postfix with OpenDKIM settings..."
 
@@ -480,7 +496,7 @@ configure_opendkim() {
 
 	# Long-term fix to prevent SMTP smuggling
 	postconf -e 'smtpd_forbid_bare_newline = normalize'
-	postconf -e 'smtpd_forbid_bare_newline_exclusions = $mynetworks'
+	postconf -e "smtpd_forbid_bare_newline_exclusions = \$mynetworks"
 
 	# A fix for "Opendkim won't start: can't open PID file?", as specified here: https://serverfault.com/a/847442
 	/lib/opendkim/opendkim.service.generate
@@ -499,7 +515,7 @@ enabled = true
 [sieve]
 enabled = true
 [dovecot]
-enabled = true" > /etc/fail2ban/jail.d/emailwiz.local
+enabled = true" >/etc/fail2ban/jail.d/emailwiz.local
 
 	sed -i "s|^backend = auto$|backend = systemd|" /etc/fail2ban/jail.conf
 }
@@ -509,17 +525,15 @@ configure_spamassassin() {
 	echo "Enabling SpamAssassin update cronjob..."
 
 	# Enable SpamAssassin update cronjob.
-	if [ -f /etc/default/spamassassin ]
-	then
+	if [ -f /etc/default/spamassassin ]; then
 		sed -i "s|^CRON=0|CRON=1|" /etc/default/spamassassin
 		printf "Restarting spamassassin..."
-		service spamassassin restart && printf " ...done\\n"
+		service spamassassin restart && printf ' ...done\n'
 		systemctl enable spamassassin
-	elif [ -f /etc/default/spamd ]
-	then
+	elif [ -f /etc/default/spamd ]; then
 		sed -i "s|^CRON=0|CRON=1|" /etc/default/spamd
 		printf "Restarting spamd..."
-		service spamd restart && printf " ...done\\n"
+		service spamd restart && printf ' ...done\n'
 		systemctl enable spamd
 	else
 		printf "!!! Neither /etc/default/spamassassin or /etc/default/spamd exists, this is unexpected and needs to be investigated"
@@ -531,7 +545,7 @@ restart_services() {
 	echo "Restarting services..."
 	for x in opendkim dovecot postfix fail2ban; do
 		printf "Restarting %s..." "$x"
-		service "$x" restart && printf " ...done\\n"
+		service "$x" restart && printf ' ...done\n'
 		systemctl enable "$x"
 	done
 }
@@ -539,16 +553,16 @@ restart_services() {
 # Function to create cronjob for postmaster
 create_cronjob() {
 	echo "Creating cronjob to delete month-old postmaster mails..."
-	cat <<EOF > /etc/cron.weekly/postmaster-clean
+	cat <<EOF >/etc/cron.weekly/postmaster-clean
 #!/bin/sh
 
 find /home/postmaster/Mail -type f -mtime +30 -name '*.mail*' -delete >/dev/null 2>&1
 exit 0
 EOF
-	sudo chmod 700 /etc/cron.weekly/postmaster-clean
+	chmod 700 /etc/cron.weekly/postmaster-clean
 
-	sudo grep -q "^deploy-hook = echo \"\$RENEWED_DOMAINS\" | grep -q '$maildomain' && service postfix reload && service dovecot reload" /etc/letsencrypt/cli.ini ||
-		echo "deploy-hook = echo \"\$RENEWED_DOMAINS\" | grep -q '$maildomain' && service postfix reload && service dovecot reload" >> /etc/letsencrypt/cli.ini
+	grep -q "^deploy-hook = echo \"\$RENEWED_DOMAINS\" | grep -q '$maildomain' && service postfix reload && service dovecot reload" /etc/letsencrypt/cli.ini ||
+		echo "deploy-hook = echo \"\$RENEWED_DOMAINS\" | grep -q '$maildomain' && service postfix reload && service dovecot reload" >>/etc/letsencrypt/cli.ini
 }
 
 # Function to generate DNS entries
@@ -556,8 +570,12 @@ generate_dns_entries() {
 	local domain="$1"
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
-	local pval="$(tr -d '\n' <"/etc/postfix/dkim/$domain/$subdom.txt" | sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" | grep -o 'p=.*')"
+	local pval
+	pval=$(tr -d '\n' </etc/postfix/dkim/"$domain"/"$subdom".txt | sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" | grep -o 'p=.*')
 	local dkimentry="$subdom._domainkey.$domain	TXT	v=DKIM1; k=rsa; $pval"
+	local dmarcentry="_dmarc.$domain	TXT	v=DMARC1; p=reject; rua=mailto:dmarc@$domain; fo=1"
+	local spfentry="$domain	TXT	v=spf1 mx a:$maildomain -all"
+	local mxentry="$domain	MX	10	$maildomain"
 
 	echo "Generating DNS entries..."
 	if ! id -u postmaster >/dev/null 2>&1; then
@@ -567,11 +585,13 @@ generate_dns_entries() {
 		fi
 	fi
 
-	sudo echo "NOTE: Elements in the entries might appear in a different order in your registrar's DNS settings.
+	cat >"$HOME/dns_emailwizard" <<EOF
+NOTE: Elements in the entries might appear in a different order in your registrar's DNS settings.
 $dkimentry
 $dmarcentry
 $spfentry
-$mxentry" > "$HOME/dns_emailwizard"
+$mxentry
+EOF
 }
 
 # Function to display final output message
