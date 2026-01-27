@@ -1,9 +1,5 @@
 #!/bin/bash
 
-if [[ -z ${ZSH_VERSION:-} ]] && command -v zsh >/dev/null 2>&1; then
-	exec zsh "$0" "$@"
-fi
-
 set -euo pipefail
 
 # Email Server Add Domain Script
@@ -58,6 +54,17 @@ Usage: ./adddomain.sh <new_domain> <mail_service_domain>
 <new_domain>: The new domain you want to add.
 <mail_service_domain>: The existing mail service domain.
 EOF
+		exit 1
+	fi
+
+	local domain_pattern='^[A-Za-z0-9.-]+$'
+	if ! [[ "$1" =~ $domain_pattern ]]; then
+		error "Provide a valid domain as the first argument (letters, numbers, dashes, and dots only)."
+		exit 1
+	fi
+
+	if ! [[ "$2" =~ $domain_pattern ]]; then
+		error "Provide a valid mail service domain as the second argument (letters, numbers, dashes, and dots only)."
 		exit 1
 	fi
 
