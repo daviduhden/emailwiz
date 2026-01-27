@@ -1,24 +1,24 @@
 # Email Server Setup Script
 
-This script installs a fully functional email server that is suitable for modern internet use. Any contribution is highly appreciated.
+This script provisions a production-ready email server with sensible defaults for contemporary internet use. Contributions are welcome.
 
-When prompted by a dialog menu at the beginning, select "Internet Site" and enter your full domain without any subdomain, e.g., `uhden.dev`.
+During the initial Postfix dialog, choose "Internet Site" and enter the bare domain (no subdomain), for example `uhden.dev`.
 
 ## This Script Installs
 
 - **Postfix** for sending and receiving mail.
-- **Dovecot** for retrieving mail to your email client.
-- Configuration files that securely link Postfix and Dovecot with native PAM logins.
-- **Spamassassin** to prevent spam and allow custom filters.
-- **OpenDKIM** to validate your emails so you can send to Gmail and other major providers.
-- **Certbot** for SSL certificates, if not already present.
-- **fail2ban** to enhance server security, with enabled modules for the above programs.
-- (optionally) **a self-signed certificate** instead of OpenDKIM and Certbot. This allows you to quickly set up an isolated mail server that collects email notifications from devices in the same local network(s) or serves as a secure/private messaging system over VPN.
+- **Dovecot** for client mail retrieval (IMAP/POP3).
+- Configuration that binds Postfix and Dovecot securely via PAM authentication.
+- **Spamassassin** for spam detection with support for custom filters.
+- **OpenDKIM** to authenticate outbound mail for delivery to major providers.
+- **Certbot** for TLS certificates, when not already present.
+- **fail2ban** to harden exposed services with relevant jails enabled.
+- (optional) **self-signed certificate** flow that replaces OpenDKIM and Certbot for isolated deployments (e.g., LAN/VPN-only notification sinks or private messaging relays).
 
 ## This Script Does _Not_...
 
-- Use a SQL database or similar. It keeps things simple by using standard Unix system users for accounts and passwords.
-- Set up a graphical web interface for mail like Roundcube or Squirrel Mail. You are expected to use a standard mail client like Thunderbird, Claws Mail or Mutt.
+- Use a SQL database or external identity store. All accounts are standard Unix users with PAM auth.
+- Provide a webmail frontend (Roundcube, SquirrelMail, etc.). Use a regular mail client such as Thunderbird, Claws Mail, or Mutt.
 
 ## Prerequisites for Installation
 
@@ -29,11 +29,11 @@ When prompted by a dialog menu at the beginning, select "Internet Site" and ente
 
 ### Unblock Your Ports
 
-While the script enables your mail ports on your server, it is common practice for VPS providers to block mail ports by default. Open a help ticket with your VPS provider asking them to open your mail ports, and they will do so promptly.
+The script opens the mail ports locally, but many VPS providers block them by default. File a support request to have ports 25/465/587/993/995 (and 110 if needed) unblocked.
 
 ### DNS Records
 
-At the end of the script, you will be given some DNS records to add to your DNS server or registrar's website. These records are primarily for authenticating your emails as non-spam. The four records are:
+At completion, the script prints DNS records required for authentication and deliverability. You must publish:
 
 1. An MX record directing to `mail.yourdomain.tld`.
 2. A TXT record for SPF (to reduce mail spoofing).
@@ -49,11 +49,11 @@ _dmarc.example.org     TXT     v=DMARC1; p=reject; rua=mailto:dmarc@example.org;
 example.org    TXT     v=spf1 mx a: -all
 ```
 
-The script will create a file, `~/dns_emailwiz`, that lists the records for your convenience and also prints them at the end of the script.
+The records are also written to `~/dns_emailwiz` for reference.
 
 ### Add a rDNS/PTR Record as Well!
 
-Set a reverse DNS or PTR record to avoid getting marked as spam. You can do this at your VPS provider, and it should be set to `mail.yourdomain.tld`. Note that you should set this for both IPv4 and IPv6.
+Configure reverse DNS (PTR) for both IPv4 and IPv6 to `mail.yourdomain.tld` via your VPS provider to avoid spam classification.
 
 ## Creating New Users/Mail Accounts
 
@@ -70,11 +70,11 @@ Any user added to the `mail` group will be able to receive mail. If a user named
 usermod -a -G mail cassie
 ```
 
-A user's mail will appear in `~/Mail/`. If you want to see your mail while SSH'd into the server, you could install mutt, add `set spoolfile="+Inbox"` to your `~/.muttrc`, and use mutt to view and reply to mail. However, you'll probably want to log in remotely:
+A user's mail resides in `~/Mail/`. For local inspection over SSH you can install mutt, add `set spoolfile="+Inbox"` to `~/.muttrc`, and read/reply there. Remote access is recommended for routine use.
 
 ## Installing with Self-Signed Certificate, in "Isolated" Mode
 
-This mode skips the setup of OpenDKIM and Certbot and instead creates a self-signed certificate that lasts 100 years. It also lets you customize the country name, state/province name, and organization name to generate the certificate automatically. This is useful for an isolated server that collects notifications from devices in the same local network(s) or that serves as a secure/private messaging system over VPN (WireGuard or similar). A server configured this way will **not** be able to send mail directly to public mail providers (Gmail, Outlook, etc.).
+This mode omits OpenDKIM and Certbot and issues a 100‑year self-signed certificate. You can preseed country, state/province, and organization fields. It targets isolated/LAN/VPN deployments (notification sink or private relay). Such a setup will **not** deliver mail directly to public providers (Gmail, Outlook, etc.).
 
 Open the script and change the following line:
 
@@ -110,7 +110,7 @@ organization_name=""
 
 ## Logging in from Email Clients (Thunderbird/mutt/etc.)
 
-To access your mail with Thunderbird, mutt, or another email program, use the following server information for your domain:
+To access mail with Thunderbird, mutt, or other clients, use:
 
 - SMTP server: `mail.uhden.dev`
 - SMTP port: 465
