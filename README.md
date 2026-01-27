@@ -13,6 +13,7 @@ When prompted by a dialog menu at the beginning, select "Internet Site" and ente
 - **OpenDKIM** to validate your emails so you can send to Gmail and other major providers.
 - **Certbot** for SSL certificates, if not already present.
 - **fail2ban** to enhance server security, with enabled modules for the above programs.
+- (optionally) **a self-signed certificate** instead of OpenDKIM and Certbot. This allows you to quickly set up an isolated mail server that collects email notifications from devices in the same local network(s) or serves as a secure/private messaging system over VPN.
 
 ## This Script Does _Not_...
 
@@ -70,6 +71,42 @@ usermod -a -G mail cassie
 ```
 
 A user's mail will appear in `~/Mail/`. If you want to see your mail while SSH'd into the server, you could install mutt, add `set spoolfile="+Inbox"` to your `~/.muttrc`, and use mutt to view and reply to mail. However, you'll probably want to log in remotely:
+
+## Installing with Self-Signed Certificate, in "Isolated" Mode
+
+This mode skips the setup of OpenDKIM and Certbot and instead creates a self-signed certificate that lasts 100 years. It also lets you customize the country name, state/province name, and organization name to generate the certificate automatically. This is useful for an isolated server that collects notifications from devices in the same local network(s) or that serves as a secure/private messaging system over VPN (WireGuard or similar). A server configured this way will **not** be able to send mail directly to public mail providers (Gmail, Outlook, etc.).
+
+Open the script and change the following line:
+
+```
+selfsigned="no" # yes or no
+```
+
+to become:
+
+```
+selfsigned="yes" # yes or no
+```
+
+You can also customize and automate the self-signed certificate creation by changing:
+
+```
+use_cert_config="no" # yes or no
+```
+
+to:
+
+```
+use_cert_config="yes" # yes or no
+```
+
+Then provide the certificate fields:
+
+```
+country_name="" # IT US UK IN etc.
+state_or_province_name=""
+organization_name=""
+```
 
 ## Logging in from Email Clients (Thunderbird/mutt/etc.)
 

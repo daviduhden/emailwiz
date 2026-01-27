@@ -1,9 +1,5 @@
 #!/bin/bash
 
-if [[ -z ${ZSH_VERSION:-} ]] && command -v zsh >/dev/null 2>&1; then
-	exec zsh "$0" "$@"
-fi
-
 set -euo pipefail
 
 # Email Server Setup Script
@@ -97,9 +93,9 @@ configure_ssl() {
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
 	local certdir="/etc/letsencrypt/live/$maildomain"
-	local selfsigned="no"
-	local use_cert_config="no"
-	local country_name=""
+	local selfsigned="no"      # yes or no
+	local use_cert_config="no" # yes or no
+	local country_name=""      # IT US UK IN etc.
 	local state_or_province_name=""
 	local organization_name=""
 	local common_name
@@ -247,7 +243,7 @@ configure_postfix() {
 
 	# helo, sender, relay and recipient restrictions
 	postconf -e "smtpd_sender_login_maps = pcre:/etc/postfix/login_maps.pcre"
-	postconf -e 'smtpd_sender_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_sender_login_mismatch, reject_unknown_reverse_client_hostname, reject_unknown_sender_domain'
+	postconf -e 'smtpd_sender_restrictions = reject_sender_login_mismatch, permit_sasl_authenticated, permit_mynetworks, reject_unknown_reverse_client_hostname, reject_unknown_sender_domain'
 	postconf -e 'smtpd_recipient_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_unauth_destination, reject_unknown_recipient_domain'
 	postconf -e 'smtpd_relay_restrictions = permit_sasl_authenticated, reject_unauth_destination'
 	postconf -e 'smtpd_helo_required = yes'
