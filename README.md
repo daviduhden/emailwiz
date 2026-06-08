@@ -15,19 +15,6 @@ I've linked this file on Github to a shorter, more memorable address on my LARBS
 - **fail2ban** to harden exposed services with relevant jails enabled.
 - (optional) **self-signed certificate** flow that replaces OpenDKIM and Certbot for isolated deployments (e.g., LAN/VPN-only notification sinks or private messaging relays).
 
-## This Script Does _Not_...
-
-## This script installs
-
-- **Postfix** to send and receive mail.
-- **Dovecot** to get mail to your email client (mutt, Thunderbird, etc).
-- Config files that link the two above securely with native log-ins.
-- **Spamassassin** to prevent spam and allow you to make custom filters.
-- **OpenDKIM** to validate you so you can send to Gmail and other big sites.
-- **Certbot** SSL certificates, if not already present.
-- **fail2ban** to increase server security, with enabled modules for the above
-  programs.
-
 ## This script does _not_...
 
 - use a SQL database or anything like that. We keep it simple and use normal
