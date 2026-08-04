@@ -32,14 +32,24 @@ else
 	RESET=""
 fi
 
-log() { printf '%s %b[INFO]%b ✅ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"; }
-warn() { printf '%s %b[WARN]%b ⚠️ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2; }
-error() { printf '%s %b[ERROR]%b ❌ %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2; }
+log() {
+	printf '%s %b[INFO]%b %s\n' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"
+}
+warn() {
+	printf '%s %b[WARN]%b %s\n' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2
+}
+error() {
+	printf '%s %b[ERROR]%b %s\n' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2
+}
 
 # Function to ensure the script is run as root
 check_root() {
 	if [ "$(id -u)" -ne 0 ]; then
-		echo "This script must be run as root. Please run it again with 'sudo' or as the root user."
+		echo "This script must be run as root." \
+			"Please run it again with 'sudo' or as the root user."
 		exit 1
 	fi
 }
@@ -59,16 +69,20 @@ EOF
 
 	local domain_pattern='^[A-Za-z0-9.-]+$'
 	if ! [[ "$1" =~ $domain_pattern ]]; then
-		error "Provide a valid domain as the first argument (letters, numbers, dashes, and dots only)."
+		error "Provide a valid domain as the first argument" \
+			"(letters, numbers, dashes, and dots only)."
 		exit 1
 	fi
 
 	if ! [[ "$2" =~ $domain_pattern ]]; then
-		error "Provide a valid mail service domain as the second argument (letters, numbers, dashes, and dots only)."
+		error "Provide a valid mail service domain as the second" \
+			"argument (letters, numbers, dashes, and dots only)."
 		exit 1
 	fi
 
-	read -r -p "Have you read and understood the above instructions? (yes/no): " response
+	read -r -p \
+		"Have you read and understood the above instructions? (yes/no): " \
+		response
 	if [ "$response" != "yes" ]; then
 		error "Please read the instructions carefully before proceeding."
 		exit 1
@@ -79,7 +93,8 @@ EOF
 add_domain_to_postfix() {
 	local new_domain="$1"
 	log "Adding the new domain to the valid Postfix addresses..."
-	if ! grep -q "^mydestination.*$new_domain" /etc/postfix/main.cf; then
+	if ! grep -q "^mydestination.*$new_domain" \
+		/etc/postfix/main.cf; then
 		sed -i "/^mydestination/s/$/, $new_domain/" /etc/postfix/main.cf
 	fi
 }
@@ -90,7 +105,8 @@ create_dkim() {
 	local subdom="mail"
 	log "Creating DKIM for the new domain..."
 	mkdir -p "/etc/postfix/dkim/$new_domain"
-	opendkim-genkey -D "/etc/postfix/dkim/$new_domain" -d "$new_domain" -s "$subdom"
+	opendkim-genkey -D "/etc/postfix/dkim/$new_domain" \
+		-d "$new_domain" -s "$subdom"
 	chgrp -R opendkim /etc/postfix/dkim/*
 	chmod -R g+r /etc/postfix/dkim/*
 }
@@ -100,8 +116,13 @@ update_dkim_tables() {
 	local new_domain="$1"
 	local subdom="mail"
 	log "Adding entries to keytable and signing table..."
-	echo "$subdom._domainkey.$new_domain $new_domain:$subdom:/etc/postfix/dkim/$new_domain/$subdom.private" >>/etc/postfix/dkim/keytable
-	echo "*@$new_domain $subdom._domainkey.$new_domain" >>/etc/postfix/dkim/signingtable
+	local _p="/etc/postfix/dkim/$new_domain/$subdom.private"
+	printf '%s %s\n' \
+		"$subdom._domainkey.$new_domain" \
+		"$new_domain:$subdom:$_p" \
+		>>/etc/postfix/dkim/keytable
+	echo "*@$new_domain $subdom._domainkey.$new_domain" \
+		>>/etc/postfix/dkim/signingtable
 }
 
 # Function to reload services
@@ -119,13 +140,18 @@ generate_dns_entries() {
 
 	log "Generating DKIM TXT entry..."
 	local pval
-	pval=$(sed -e '1d' -e ':a' -e 'N' -e '$!ba' -e 's/\n//g' "/etc/postfix/dkim/$new_domain/$subdom.txt" |
+	pval=$(sed -e '1d' -e ':a' -e 'N' -e '$!ba' \
+		-e 's/\n//g' \
+		"/etc/postfix/dkim/$new_domain/$subdom.txt" |
 		sed -e 's/k=rsa.* "p=/k=rsa; p=/' \
 			-e "s/\"\s*).*//" |
 		grep -o 'p=.*')
 
-	local dkimentry="$subdom._domainkey.$new_domain	TXT	v=DKIM1; k=rsa; $pval"
-	local dmarcentry="_dmarc.$new_domain	TXT	v=DMARC1; p=reject; rua=mailto:dmarc@$new_domain; fo=1"
+	local dkimentry="$subdom._domainkey.$new_domain"
+	dkimentry+="	TXT	v=DKIM1; k=rsa; $pval"
+	local dmarcentry="_dmarc.$new_domain"
+	dmarcentry+="	TXT	v=DMARC1; p=reject;"
+	dmarcentry+=" rua=mailto:dmarc@$new_domain; fo=1"
 	local spfentry="$new_domain	TXT	v=spf1 mx a:$maildomain -all"
 	local mxentry="$new_domain	MX	10	$maildomain"
 
