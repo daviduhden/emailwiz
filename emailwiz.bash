@@ -132,19 +132,19 @@ configure_ssl() {
 	countryName             = $country_name
 	stateOrProvinceName     = $state_or_province_name
 	organizationName        = $organization_name
-	commonName              = $common_name " > "$certdir/certconfig.conf"
-fi
+	commonName              = $common_name " >"$certdir/certconfig.conf"
+	fi
 
-# Open required mail ports
-for port in 993 465 25 587; do
-	ufw allow "$port" 2>/dev/null
-done
+	# Open required mail ports
+	for port in 993 465 25 587; do
+		ufw allow "$port" 2>/dev/null
+	done
 
 	log "Checking DNS records..."
 	local ipv4
-	ipv4=$(dig +short "$domain" \
-		| grep -m1 -Eo '([0-9]+\.){3}[0-9]+' \
-		| tr -d '[:space:]')
+	ipv4=$(dig +short "$domain" |
+		grep -m1 -Eo '([0-9]+\.){3}[0-9]+' |
+		tr -d '[:space:]')
 	[ -z "$ipv4" ] && {
 		error "No IPv4 address found for the domain ($domain)." \
 			"Please ensure that your domain's DNS records are" \
@@ -153,9 +153,9 @@ done
 		exit 1
 	}
 	local ipv6
-	ipv6=$(dig +short "$domain" AAAA \
-		| grep -m1 -Eo '([0-9a-fA-F:]+)' \
-		| tr -d '[:space:]')
+	ipv6=$(dig +short "$domain" AAAA |
+		grep -m1 -Eo '([0-9a-fA-F:]+)' |
+		tr -d '[:space:]')
 	[ -z "$ipv6" ] && {
 		error "No IPv6 address found for your domain ($domain)." \
 			"Please ensure that your DNS records include an" \
@@ -202,12 +202,12 @@ done
 		ufw allow 80 2>/dev/null
 
 		[ ! -d "$certdir" ] &&
-			possiblecert="$(certbot certificates 2>/dev/null \
-				| grep "Domains:\.* \(\*\.$domain\|$maildomain\)\(\s\|$\)" \
-					-A 2 \
-				| awk '/Certificate Path/ {print $3}' \
-				| head -n1 \
-				| tr -d '[:space:]')" &&
+			possiblecert="$(certbot certificates 2>/dev/null |
+				grep "Domains:\.* \(\*\.$domain\|$maildomain\)\(\s\|$\)" \
+					-A 2 |
+				awk '/Certificate Path/ {print $3}' |
+				head -n1 |
+				tr -d '[:space:]')" &&
 			certdir="${possiblecert%/*}"
 
 		[ ! -d "$certdir" ] &&
@@ -231,16 +231,16 @@ done
 			esac
 	fi
 
-	[ ! -f "$certdir/fullchain.pem" ] \
-		&& echo "Error locating or installing SSL certificate." \
-		&& exit 1
-	[ ! -f "$certdir/privkey.pem" ] \
-		&& echo "Error locating or installing SSL certificate." \
-		&& exit 1
+	[ ! -f "$certdir/fullchain.pem" ] &&
+		echo "Error locating or installing SSL certificate." &&
+		exit 1
+	[ ! -f "$certdir/privkey.pem" ] &&
+		echo "Error locating or installing SSL certificate." &&
+		exit 1
 	if [ "$selfsigned" != "yes" ]; then
-		[ ! -f "$certdir/cert.pem" ] \
-			&& echo "Error locating or installing SSL certificate." \
-			&& exit 1
+		[ ! -f "$certdir/cert.pem" ] &&
+			echo "Error locating or installing SSL certificate." &&
+			exit 1
 	fi
 }
 
@@ -282,21 +282,15 @@ configure_postfix() {
 	postconf -e 'smtpd_tls_auth_only = yes'
 
 	# Exclude insecure and obsolete encryption protocols.
-	postconf -e 'smtpd_tls_mandatory_protocols = '\
-'!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
-	postconf -e 'smtp_tls_mandatory_protocols = '\
-'!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
-	postconf -e 'smtpd_tls_protocols = '\
-'!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
-	postconf -e 'smtp_tls_protocols = '\
-'!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
+	postconf -e 'smtpd_tls_mandatory_protocols = ''!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
+	postconf -e 'smtp_tls_mandatory_protocols = ''!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
+	postconf -e 'smtpd_tls_protocols = ''!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
+	postconf -e 'smtp_tls_protocols = ''!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
 
 	# Exclude suboptimal ciphers.
 	if [ "$allow_suboptimal_ciphers" = "no" ]; then
 		postconf -e 'tls_preempt_cipherlist = yes'
-		postconf -e 'smtpd_tls_exclude_ciphers = aNULL, '\
-'LOW, EXP, MEDIUM, ADH, AECDH, MD5, DSS, ECDSA, '\
-'CAMELLIA128, 3DES, CAMELLIA256, RSA+AES, eNULL'
+		postconf -e 'smtpd_tls_exclude_ciphers = aNULL, ''LOW, EXP, MEDIUM, ADH, AECDH, MD5, DSS, ECDSA, ''CAMELLIA128, 3DES, CAMELLIA256, RSA+AES, eNULL'
 	fi
 
 	# Here we tell Postfix to look to Dovecot for authenticating
@@ -309,19 +303,11 @@ configure_postfix() {
 	# helo, sender, relay and recipient restrictions
 	postconf -e \
 		"smtpd_sender_login_maps = pcre:/etc/postfix/login_maps.pcre"
-	postconf -e 'smtpd_sender_restrictions = '\
-'reject_sender_login_mismatch, permit_sasl_authenticated, '\
-'permit_mynetworks, reject_unknown_reverse_client_hostname, '\
-'reject_unknown_sender_domain'
-	postconf -e 'smtpd_recipient_restrictions = '\
-'permit_sasl_authenticated, permit_mynetworks, '\
-'reject_unauth_destination, reject_unknown_recipient_domain'
-	postconf -e 'smtpd_relay_restrictions = '\
-'permit_sasl_authenticated, reject_unauth_destination'
+	postconf -e 'smtpd_sender_restrictions = ''reject_sender_login_mismatch, permit_sasl_authenticated, ''permit_mynetworks, reject_unknown_reverse_client_hostname, ''reject_unknown_sender_domain'
+	postconf -e 'smtpd_recipient_restrictions = ''permit_sasl_authenticated, permit_mynetworks, ''reject_unauth_destination, reject_unknown_recipient_domain'
+	postconf -e 'smtpd_relay_restrictions = ''permit_sasl_authenticated, reject_unauth_destination'
 	postconf -e 'smtpd_helo_required = yes'
-	postconf -e 'smtpd_helo_restrictions = permit_mynetworks, '\
-'permit_sasl_authenticated, reject_invalid_helo_hostname, '\
-'reject_non_fqdn_helo_hostname, reject_unknown_helo_hostname'
+	postconf -e 'smtpd_helo_restrictions = permit_mynetworks, ''permit_sasl_authenticated, reject_invalid_helo_hostname, ''reject_non_fqdn_helo_hostname, reject_unknown_helo_hostname'
 
 	# NOTE: the trailing slash here, or for any directory name in
 	# the home_mailbox command, is necessary as it distinguishes a
@@ -352,15 +338,10 @@ configure_postfix() {
 		-e '/^\s*-o\s\+smtpd_tls_security_level=encrypt/d' \
 		-e '/^\s*-o\s\+smtpd_tls_auth_only=yes/d' \
 		-e '/^\s*-o\s\+smtpd_enforce_tls=yes/d' \
-		-e '/^\s*-o\s\+smtpd_client_restrictions='\
-'permit_sasl_authenticated,reject/d' \
-		-e '/^\s*-o\s\+smtpd_sender_restrictions='\
-'reject_sender_login_mismatch/d' \
-		-e '/^\s*-o\s\+smtpd_sender_login_maps='\
-'pcre:\/etc\/postfix\/login_maps.pcre/d' \
-		-e '/^\s*-o\s\+smtpd_recipient_restrictions='\
-'permit_sasl_authenticated,'\
-'reject_unauth_destination/d' \
+		-e '/^\s*-o\s\+smtpd_client_restrictions=''permit_sasl_authenticated,reject/d' \
+		-e '/^\s*-o\s\+smtpd_sender_restrictions=''reject_sender_login_mismatch/d' \
+		-e '/^\s*-o\s\+smtpd_sender_login_maps=''pcre:\/etc\/postfix\/login_maps.pcre/d' \
+		-e '/^\s*-o\s\+smtpd_recipient_restrictions=''permit_sasl_authenticated,''reject_unauth_destination/d' \
 		/etc/postfix/master.cf
 
 	cat >>/etc/postfix/master.cf <<EOF
@@ -548,13 +529,13 @@ configure_opendkim() {
 	# Generate the OpenDKIM info:
 	echo 'Configuring OpenDKIM...'
 	grep -q "$domain" /etc/postfix/dkim/keytable 2>/dev/null ||
-	{
-		local _p
-		_p="/etc/postfix/dkim/$domain/$subdom.private"
-		printf '%s %s\n' "$subdom._domainkey.$domain" \
-			"$domain:$subdom:$_p" \
-			>>/etc/postfix/dkim/keytable
-	}
+		{
+			local _p
+			_p="/etc/postfix/dkim/$domain/$subdom.private"
+			printf '%s %s\n' "$subdom._domainkey.$domain" \
+				"$domain:$subdom:$_p" \
+				>>/etc/postfix/dkim/keytable
+		}
 
 	grep -q "$domain" /etc/postfix/dkim/signingtable 2>/dev/null ||
 		echo "*@$domain $subdom._domainkey.$domain" \
@@ -578,13 +559,13 @@ configure_opendkim() {
 	sed -i '/^#Canonicalization/s/^#//' /etc/opendkim.conf
 
 	sed -i '/Socket/s/^#*/#/' /etc/opendkim.conf
-	grep -q '^Socket\s*inet:12301@localhost' /etc/opendkim.conf \
-		|| echo 'Socket inet:12301@localhost' \
+	grep -q '^Socket\s*inet:12301@localhost' /etc/opendkim.conf ||
+		echo 'Socket inet:12301@localhost' \
 			>>/etc/opendkim.conf
 
 	# OpenDKIM daemon settings, removing previously activated socket.
-	sed -i '/^SOCKET/d' /etc/default/opendkim \
-		&& echo 'SOCKET="inet:12301@localhost"' \
+	sed -i '/^SOCKET/d' /etc/default/opendkim &&
+		echo 'SOCKET="inet:12301@localhost"' \
 			>>/etc/default/opendkim
 
 	echo "Configuring Postfix with OpenDKIM settings..."
@@ -687,8 +668,8 @@ EOF
 	_hook_line+=" | grep -q '$maildomain'"
 	_hook_line+=" && service postfix reload"
 	_hook_line+=" && service dovecot reload"
-	grep -q "^$_hook_line" /etc/letsencrypt/cli.ini \
-		|| echo "$_hook_line" >>/etc/letsencrypt/cli.ini
+	grep -q "^$_hook_line" /etc/letsencrypt/cli.ini ||
+		echo "$_hook_line" >>/etc/letsencrypt/cli.ini
 }
 
 # Function to generate DNS entries
@@ -697,9 +678,9 @@ generate_dns_entries() {
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
 	local pval
-	pval=$(tr -d '\n' </etc/postfix/dkim/"$domain"/"$subdom".txt \
-		| sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" \
-		| grep -o 'p=.*')
+	pval=$(tr -d '\n' </etc/postfix/dkim/"$domain"/"$subdom".txt |
+		sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" |
+		grep -o 'p=.*')
 	dkimentry="$subdom._domainkey.$domain	TXT	v=DKIM1; k=rsa; $pval"
 	dmarcentry="_dmarc.$domain"
 	dmarcentry+="	TXT	v=DMARC1; p=reject;"
