@@ -50,6 +50,89 @@ error() {
 }
 selfsigned="no" # yes or no
 
+# Init system detection for Devuan/Debian/Ubuntu compatibility
+_init=""
+detect_init() {
+	if [ ! -f /proc/1/comm ]; then
+		_init="unknown"
+	elif grep -qFx 'systemd' /proc/1/comm 2>/dev/null; then
+		_init="systemd"
+	elif grep -qFx 'runit' /proc/1/comm 2>/dev/null; then
+		_init="runit"
+	elif grep -qFx 'init' /proc/1/comm 2>/dev/null; then
+		if command -v rc-service >/dev/null 2>&1; then
+			_init="openrc"
+		else
+			_init="sysvinit"
+		fi
+	else
+		_init="unknown"
+	fi
+	log "Detected init system: $_init"
+}
+
+svc_stop() {
+	case "$_init" in
+		systemd) systemctl -q stop "$1" 2>/dev/null || true ;;
+		openrc)  rc-service "$1" stop 2>/dev/null || true ;;
+		runit)   sv stop "$1" 2>/dev/null || true ;;
+		*)       service "$1" stop 2>/dev/null || true ;;
+	esac
+}
+
+svc_restart() {
+	case "$_init" in
+		systemd) systemctl restart "$1" ;;
+		openrc)  rc-service "$1" restart ;;
+		runit)   sv restart "$1" ;;
+		*)       service "$1" restart ;;
+	esac
+}
+
+svc_reload() {
+	local _svc
+	for _svc in "$@"; do
+		case "$_init" in
+			systemd) systemctl reload "$_svc" ;;
+			openrc) rc-service "$_svc" reload 2>/dev/null \
+				|| rc-service "$_svc" restart ;;
+			runit) sv reload "$_svc" 2>/dev/null \
+				|| sv restart "$_svc" ;;
+			*) service "$_svc" reload 2>/dev/null \
+				|| service "$_svc" restart ;;
+		esac
+	done
+}
+
+svc_enable() {
+	case "$_init" in
+		systemd) systemctl enable "$1" ;;
+		openrc)  rc-update add "$1" 2>/dev/null || true ;;
+		runit)   if [ -d "/etc/sv/$1" ] \
+				&& [ ! -L "/var/service/$1" ]; then
+				ln -s "/etc/sv/$1" "/var/service/"
+			fi ;;
+		*)       update-rc.d "$1" defaults 2>/dev/null || true ;;
+	esac
+}
+
+svc_daemon_reload() {
+	case "$_init" in
+		systemd) systemctl daemon-reload ;;
+		*)       : ;;
+	esac
+}
+
+# Return the appropriate postfix/dovecot reload command for certbot hooks
+svc_reload_cmd() {
+	case "$_init" in
+		systemd) printf '%s' 'systemctl reload' ;;
+		runit)   printf '%s' 'sv reload' ;;
+		openrc)  printf '%s' 'rc-service' ;;
+		*)       printf '%s' 'service' ;;
+	esac
+}
+
 # Function to ensure the script is run as root
 check_root() {
 	if [ "$(id -u)" -ne 0 ]; then
@@ -95,11 +178,22 @@ install_packages() {
 	local packages=(
 		postfix postfix-pcre dovecot-imapd dovecot-pop3d
 		dovecot-sieve opendkim opendkim-tools spamassassin
-		spamc net-tools fail2ban bind9-host
+		spamc net-tools fail2ban bind9-host nftables
 	)
 	log "Stopping Dovecot and Postfix services..."
-	systemctl -q stop dovecot
-	systemctl -q stop postfix
+	svc_stop dovecot
+	svc_stop postfix
+	if dpkg -s postfix >/dev/null 2>&1; then
+		warn "Existing mail server packages detected."
+		warn "This will PURGE and reinstall all packages."
+		warn "Configuration in /etc/postfix and /etc/dovecot"
+		warn "  will be backed up before purge."
+		read -r -p "Continue with purge and reinstall? (yes/no): " _re
+		if [ "$_re" != "yes" ]; then
+			error "Aborting installation."
+			exit 1
+		fi
+	fi
 	log "Purging existing packages..."
 	apt-get purge --auto-remove -y "${packages[@]}"
 	log "Installing required packages..."
@@ -135,11 +229,6 @@ configure_ssl() {
 	commonName              = $common_name " >"$certdir/certconfig.conf"
 	fi
 
-	# Open required mail ports
-	for port in 993 465 25 587; do
-		ufw allow "$port" 2>/dev/null
-	done
-
 	log "Checking DNS records..."
 	local ipv4
 	ipv4=$(dig +short "$domain" |
@@ -163,15 +252,26 @@ configure_ssl() {
 		exit 1
 	}
 
-	log "Opening required mail ports..."
-	if command -v ufw >/dev/null 2>&1; then
-		log "Opening required mail ports with ufw..."
-		ufw allow 80,993,465,25,587,110,995/tcp 2>/dev/null
-	else
-		warn "ufw not found, opening required mail ports with iptables..."
-		iptables -A INPUT -p tcp -m multiport \
-			--dports 80,993,465,25,587,110,995 -j ACCEPT
-	fi
+	log "Configuring firewall with nftables..."
+	cat <<'NFTEOF' >/etc/nftables.conf
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+	chain input {
+		type filter hook input priority 0;
+		ct state established,related accept
+		iif lo accept
+		tcp dport {22, 80, 993, 465, 25, 587, 110, 995} accept
+		ip protocol icmp accept
+		ip6 nexthdr icmpv6 accept
+		counter drop
+	}
+}
+NFTEOF
+	svc_enable nftables
+	svc_restart nftables
 
 	if [ "$selfsigned" = "yes" ]; then
 		log "Generating self-signed certificate..."
@@ -199,11 +299,11 @@ configure_ssl() {
 			-out "$certdir/fullchain.pem"
 	else
 		log "Obtaining Let's Encrypt certificate..."
-		ufw allow 80 2>/dev/null
+		nft add rule inet filter input tcp dport 80 accept 2>/dev/null || true
 
 		[ ! -d "$certdir" ] &&
 			possiblecert="$(certbot certificates 2>/dev/null |
-				grep "Domains:\.* \(\*\.$domain\|$maildomain\)\(\s\|$\)" \
+				grep "Domains:.* \(\*\.$domain\|$maildomain\)" \
 					-A 2 |
 				awk '/Certificate Path/ {print $3}' |
 				head -n1 |
@@ -231,16 +331,22 @@ configure_ssl() {
 			esac
 	fi
 
-	[ ! -f "$certdir/fullchain.pem" ] &&
-		echo "Error locating or installing SSL certificate." &&
+	[ ! -f "$certdir/fullchain.pem" ] && {
+		error "Error locating or installing SSL certificate" \
+			"(fullchain.pem not found)."
 		exit 1
-	[ ! -f "$certdir/privkey.pem" ] &&
-		echo "Error locating or installing SSL certificate." &&
+	}
+	[ ! -f "$certdir/privkey.pem" ] && {
+		error "Error locating or installing SSL certificate" \
+			"(privkey.pem not found)."
 		exit 1
+	}
 	if [ "$selfsigned" != "yes" ]; then
-		[ ! -f "$certdir/cert.pem" ] &&
-			echo "Error locating or installing SSL certificate." &&
+		[ ! -f "$certdir/cert.pem" ] && {
+			error "Error locating or installing SSL certificate" \
+				"(cert.pem not found)."
 			exit 1
+		}
 	fi
 }
 
@@ -322,7 +428,7 @@ configure_postfix() {
 
 	# strips "Received From:" in sent emails
 	echo "/^Received:.*/     IGNORE
-	/^X-Originating-IP:/    IGNORE" >>/etc/postfix/header_checks
+	/^X-Originating-IP:/    IGNORE" >/etc/postfix/header_checks
 
 	# Create a login map file that ensures that if a sender wants
 	# to send a mail from a user at our local domain, they must be
@@ -521,8 +627,14 @@ configure_opendkim() {
 	# Create an OpenDKIM key in the proper place with proper permissions.
 	echo 'Generating OpenDKIM keys...'
 	mkdir -p "/etc/postfix/dkim/$domain"
-	sudo chmod 700 "/etc/postfix/dkim/$domain"
-	sudo chmod -R g+r /etc/postfix/dkim/*
+	chmod 700 "/etc/postfix/dkim/$domain"
+
+	if [ ! -f "/etc/postfix/dkim/$domain/$subdom.private" ]; then
+		opendkim-genkey -D "/etc/postfix/dkim/$domain" \
+			-d "$domain" -s "$subdom"
+		chgrp -R opendkim /etc/postfix/dkim/*
+		chmod -R g+r /etc/postfix/dkim/*
+	fi
 
 	echo "Configuring OpenDKIM..."
 
@@ -587,8 +699,12 @@ configure_opendkim() {
 
 	# A fix for "Opendkim won't start: can't open PID file?",
 	# as specified here: https://serverfault.com/a/847442
-	/lib/opendkim/opendkim.service.generate
-	systemctl daemon-reload
+	case "$_init" in
+		systemd)
+			/lib/opendkim/opendkim.service.generate
+			svc_daemon_reload
+			;;
+	esac
 }
 
 # Function to configure fail2ban
@@ -605,7 +721,13 @@ enabled = true
 [dovecot]
 enabled = true" >/etc/fail2ban/jail.d/emailwiz.local
 
-	sed -i "s|^backend = auto$|backend = systemd|" /etc/fail2ban/jail.conf
+	if [ "$_init" = "systemd" ]; then
+		printf '[DEFAULT]\nbackend = systemd\n' \
+			>/etc/fail2ban/jail.d/emailwiz-backend.local
+	else
+		printf '[DEFAULT]\nbackend = auto\n' \
+			>/etc/fail2ban/jail.d/emailwiz-backend.local
+	fi
 }
 
 # Function to configure SpamAssassin
@@ -616,13 +738,13 @@ configure_spamassassin() {
 	if [ -f /etc/default/spamassassin ]; then
 		sed -i "s|^CRON=0|CRON=1|" /etc/default/spamassassin
 		printf "Restarting spamassassin..."
-		service spamassassin restart && printf ' ...done\n'
-		systemctl enable spamassassin
+		svc_restart spamassassin && printf ' ...done\n'
+		svc_enable spamassassin
 	elif [ -f /etc/default/spamd ]; then
 		sed -i "s|^CRON=0|CRON=1|" /etc/default/spamd
 		printf "Restarting spamd..."
-		service spamd restart && printf ' ...done\n'
-		systemctl enable spamd
+		svc_restart spamd && printf ' ...done\n'
+		svc_enable spamd
 	else
 		printf '%s' \
 			"!!! Neither /etc/default/spamassassin or" \
@@ -636,8 +758,8 @@ restart_services() {
 	echo "Restarting services..."
 	for x in opendkim dovecot postfix fail2ban; do
 		printf "Restarting %s..." "$x"
-		service "$x" restart && printf ' ...done\n'
-		systemctl enable "$x"
+		svc_restart "$x" && printf ' ...done\n'
+		svc_enable "$x"
 	done
 }
 
@@ -645,13 +767,8 @@ restart_services() {
 create_cronjob() {
 	local maildomain="$1"
 
-	# If ufw is used, enable mail ports.
-	pgrep ufw >/dev/null && {
-		ufw allow 993
-		ufw allow 465
-		ufw allow 587
-		ufw allow 25
-	}
+	svc_enable nftables
+	svc_restart nftables >/dev/null 2>&1 || true
 
 	echo "Creating cronjob to delete month-old postmaster mails..."
 	cat <<EOF >/etc/cron.weekly/postmaster-clean
@@ -663,11 +780,28 @@ exit 0
 EOF
 	chmod 700 /etc/cron.weekly/postmaster-clean
 
-	local _hook_line
+	local _hook_line _reload_cmd
+	_reload_cmd="$(svc_reload_cmd)"
 	_hook_line="deploy-hook = echo \"\$RENEWED_DOMAINS\""
 	_hook_line+=" | grep -q '$maildomain'"
-	_hook_line+=" && service postfix reload"
-	_hook_line+=" && service dovecot reload"
+	case "$_init" in
+		systemd)
+			_hook_line+=" && $_reload_cmd postfix"
+			_hook_line+=" && $_reload_cmd dovecot"
+			;;
+		runit)
+			_hook_line+=" && $_reload_cmd postfix"
+			_hook_line+=" && $_reload_cmd dovecot"
+			;;
+		openrc)
+			_hook_line+=" && $_reload_cmd postfix reload"
+			_hook_line+=" && $_reload_cmd dovecot reload"
+			;;
+		*)
+			_hook_line+=" && $_reload_cmd postfix reload"
+			_hook_line+=" && $_reload_cmd dovecot reload"
+			;;
+	esac
 	grep -q "^$_hook_line" /etc/letsencrypt/cli.ini ||
 		echo "$_hook_line" >>/etc/letsencrypt/cli.ini
 }
@@ -690,8 +824,8 @@ generate_dns_entries() {
 
 	echo "Generating DNS entries..."
 	if ! id -u postmaster >/dev/null 2>&1; then
-		if ! sudo useradd -r -m -G mail postmaster; then
-			echo "Error: Failed to create postmaster user."
+		if ! useradd -r -m -G mail postmaster; then
+			error "Failed to create postmaster user."
 			exit 1
 		fi
 	fi
@@ -746,11 +880,17 @@ EOF
 # Main script execution
 main() {
 	check_root
+	detect_init
 	confirm_installation
 	install_packages
 
 	domain="$(hostname --domain | tr -d '[:space:]')"
 	subdom=${MAIL_SUBDOM:-mail}
+	if [ -z "$domain" ]; then
+		error "No domain found. Set a fully qualified hostname" \
+			"(e.g. 'mail.example.com') before running this script."
+		exit 1
+	fi
 	maildomain="$subdom.$domain"
 
 	configure_ssl "$domain" "$subdom"

@@ -45,10 +45,46 @@ error() {
 		"$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2
 }
 
+# Init system detection for Devuan/Debian/Ubuntu compatibility
+_init=""
+detect_init() {
+	if [ ! -f /proc/1/comm ]; then
+		_init="unknown"
+	elif grep -qFx 'systemd' /proc/1/comm 2>/dev/null; then
+		_init="systemd"
+	elif grep -qFx 'runit' /proc/1/comm 2>/dev/null; then
+		_init="runit"
+	elif grep -qFx 'init' /proc/1/comm 2>/dev/null; then
+		if command -v rc-service >/dev/null 2>&1; then
+			_init="openrc"
+		else
+			_init="sysvinit"
+		fi
+	else
+		_init="unknown"
+	fi
+	log "Detected init system: $_init"
+}
+
+svc_reload() {
+	local _svc
+	for _svc in "$@"; do
+		case "$_init" in
+			systemd) systemctl reload "$_svc" ;;
+			openrc) rc-service "$_svc" reload 2>/dev/null \
+				|| rc-service "$_svc" restart ;;
+			runit) sv reload "$_svc" 2>/dev/null \
+				|| sv restart "$_svc" ;;
+			*) service "$_svc" reload 2>/dev/null \
+				|| service "$_svc" restart ;;
+		esac
+	done
+}
+
 # Function to ensure the script is run as root
 check_root() {
 	if [ "$(id -u)" -ne 0 ]; then
-		echo "This script must be run as root." \
+		error "This script must be run as root." \
 			"Please run it again with 'sudo' or as the root user."
 		exit 1
 	fi
@@ -102,7 +138,7 @@ add_domain_to_postfix() {
 # Function to create DKIM for the new domain
 create_dkim() {
 	local new_domain="$1"
-	local subdom="mail"
+	local subdom="${MAIL_SUBDOM:-mail}"
 	log "Creating DKIM for the new domain..."
 	mkdir -p "/etc/postfix/dkim/$new_domain"
 	opendkim-genkey -D "/etc/postfix/dkim/$new_domain" \
@@ -114,7 +150,7 @@ create_dkim() {
 # Function to update DKIM tables
 update_dkim_tables() {
 	local new_domain="$1"
-	local subdom="mail"
+	local subdom="${MAIL_SUBDOM:-mail}"
 	log "Adding entries to keytable and signing table..."
 	local _p="/etc/postfix/dkim/$new_domain/$subdom.private"
 	printf '%s %s\n' \
@@ -128,14 +164,14 @@ update_dkim_tables() {
 # Function to reload services
 reload_services() {
 	log "Reloading OpenDKIM and Postfix services..."
-	systemctl reload opendkim postfix
+	svc_reload opendkim postfix
 }
 
 # Function to generate DNS entries for the new domain
 generate_dns_entries() {
 	local new_domain="$1"
 	local mail_service_domain="$2"
-	local subdom="mail"
+	local subdom="${MAIL_SUBDOM:-mail}"
 	local maildomain="$subdom.$mail_service_domain"
 
 	log "Generating DKIM TXT entry..."
@@ -175,6 +211,7 @@ EOF
 # Main script execution
 main() {
 	check_root
+	detect_init
 	validate_input "$@"
 	local new_domain="$1"
 	local mail_service_domain="$2"

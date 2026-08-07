@@ -1,6 +1,6 @@
 # Email Server Setup Script
 
-This script provisions a production-ready email server with sensible defaults for contemporary internet use. Contributions are welcome.
+This script provisions a production-ready email server on Debian, Ubuntu, or Devuan with sensible defaults for contemporary internet use. Contributions are welcome.
 
 I've linked this file on Github to a shorter, more memorable address on my LARBS.xyz domain, so you can get it on your machine with this short command:
 
@@ -13,7 +13,8 @@ I've linked this file on Github to a shorter, more memorable address on my LARBS
 - **OpenDKIM** to authenticate outbound mail for delivery to major providers.
 - **Certbot** for TLS certificates, when not already present.
 - **fail2ban** to harden exposed services with relevant jails enabled.
-- (optional) **self-signed certificate** flow that replaces OpenDKIM and Certbot for isolated deployments (e.g., LAN/VPN-only notification sinks or private messaging relays).
+- **nftables** to configure the firewall with mail and SSH port access.
+- (optional) **self-signed certificate** flow that replaces Certbot for isolated deployments (e.g., LAN/VPN-only notification sinks or private messaging relays).
 
 ## This script does _not_...
 
@@ -29,14 +30,31 @@ I've linked this file on Github to a shorter, more memorable address on my LARBS
 
 ## Prerequisites for Installation
 
-1. A Debian or Ubuntu server.
+1. A Debian, Devuan, or Ubuntu server with a fully qualified hostname set (e.g., `mail.example.com`). The script detects your domain from the hostname.
 2. DNS records that point at least your domain's `mail.` subdomain to your server's IP (IPv4 and IPv6). This is required on the initial run for Certbot to obtain an SSL certificate for your `mail.` subdomain.
+
+## Configuration Options
+
+### Environment Variables
+
+- `MAIL_SUBDOM` — override the mail subdomain (default: `mail`). Example: `MAIL_SUBDOM=post ./emailwiz.bash` to use `post.example.com` instead of `mail.example.com`. This also affects the `adddomain.bash` helper script.
+- `NO_COLOR` — set to `1` to disable colored log output.
+
+### Adding Additional Domains
+
+After initial setup, add extra domains with:
+
+```
+./adddomain.bash <new_domain> <mail_service_domain>
+```
+
+This updates Postfix, generates a new DKIM key pair, and emits the required DNS records.
 
 ## Mandatory Finishing Touches
 
 ### Unblock Your Ports
 
-The script opens the mail ports locally, but many VPS providers block them by default. File a support request to have ports 25/465/587/993/995 (and 110 if needed) unblocked.
+The script configures nftables to allow mail ports (25, 465, 587, 993, 995, 110), SSH (22), and HTTP (80) locally, but many VPS providers block them by default. File a support request to have ports 25/465/587/993/995 (and 110 if needed) unblocked.
 
 ### DNS Records
 
@@ -91,7 +109,7 @@ A user's mail resides in `~/Mail/`. For local inspection over SSH you can instal
 
 ## Installing with Self-Signed Certificate, in "Isolated" Mode
 
-This mode omits OpenDKIM and Certbot and issues a 100‑year self-signed certificate. You can preseed country, state/province, and organization fields. It targets isolated/LAN/VPN deployments (notification sink or private relay). Such a setup will **not** deliver mail directly to public providers (Gmail, Outlook, etc.).
+This mode omits Certbot and issues a 100-year self-signed certificate. DKIM keys are still generated. You can preseed country, state/province, and organization fields. It targets isolated/LAN/VPN deployments (notification sink or private relay). Such a setup will **not** deliver mail directly to public providers (Gmail, Outlook, etc.).
 
 Open the script and change the following line:
 
@@ -182,7 +200,7 @@ this script or documentation has saved you some frustration, donate here:
 - btc: `bc1qzw6mk80t3vrp2cugmgfjqgtgzhldrqac5axfh4`
 - xmr: `8A5v4Ci11Lz7BDoE2z2oPqMoNHzr5Zj8B3Q2N2qzqrUKhAKgNQYGSSaZDnBUWg6iXCiZyvC9mVCyGj5kGMJTi1zGKGM4Trm`
 
-- Always check `journalctl -xe` to see the specific problem.
+- Check service logs for errors. On systemd: `journalctl -xe`. On Devuan (sysvinit/OpenRC/runit): check `/var/log/mail.log`, `/var/log/syslog`, or service-specific log files.
 - Check with your VPS host and ask them to enable mail ports. Some providers
   disable them by default. It shouldn't take any time.
 - Go to [this site](https://appmaildev.com/en/dkim) to test your TXT records.
