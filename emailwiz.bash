@@ -73,19 +73,19 @@ detect_init() {
 
 svc_stop() {
 	case "$_init" in
-		systemd) systemctl -q stop "$1" 2>/dev/null || true ;;
-		openrc)  rc-service "$1" stop 2>/dev/null || true ;;
-		runit)   sv stop "$1" 2>/dev/null || true ;;
-		*)       service "$1" stop 2>/dev/null || true ;;
+	systemd) systemctl -q stop "$1" 2>/dev/null || true ;;
+	openrc) rc-service "$1" stop 2>/dev/null || true ;;
+	runit) sv stop "$1" 2>/dev/null || true ;;
+	*) service "$1" stop 2>/dev/null || true ;;
 	esac
 }
 
 svc_restart() {
 	case "$_init" in
-		systemd) systemctl restart "$1" ;;
-		openrc)  rc-service "$1" restart ;;
-		runit)   sv restart "$1" ;;
-		*)       service "$1" restart ;;
+	systemd) systemctl restart "$1" ;;
+	openrc) rc-service "$1" restart ;;
+	runit) sv restart "$1" ;;
+	*) service "$1" restart ;;
 	esac
 }
 
@@ -93,43 +93,43 @@ svc_reload() {
 	local _svc
 	for _svc in "$@"; do
 		case "$_init" in
-			systemd) systemctl reload "$_svc" ;;
-			openrc) rc-service "$_svc" reload 2>/dev/null \
-				|| rc-service "$_svc" restart ;;
-			runit) sv reload "$_svc" 2>/dev/null \
-				|| sv restart "$_svc" ;;
-			*) service "$_svc" reload 2>/dev/null \
-				|| service "$_svc" restart ;;
+		systemd) systemctl reload "$_svc" ;;
+		openrc) rc-service "$_svc" reload 2>/dev/null ||
+			rc-service "$_svc" restart ;;
+		runit) sv reload "$_svc" 2>/dev/null ||
+			sv restart "$_svc" ;;
+		*) service "$_svc" reload 2>/dev/null ||
+			service "$_svc" restart ;;
 		esac
 	done
 }
 
 svc_enable() {
 	case "$_init" in
-		systemd) systemctl enable "$1" ;;
-		openrc)  rc-update add "$1" 2>/dev/null || true ;;
-		runit)   if [ -d "/etc/sv/$1" ] \
-				&& [ ! -L "/var/service/$1" ]; then
-				ln -s "/etc/sv/$1" "/var/service/"
-			fi ;;
-		*)       update-rc.d "$1" defaults 2>/dev/null || true ;;
+	systemd) systemctl enable "$1" ;;
+	openrc) rc-update add "$1" 2>/dev/null || true ;;
+	runit) if [ -d "/etc/sv/$1" ] &&
+		[ ! -L "/var/service/$1" ]; then
+		ln -s "/etc/sv/$1" "/var/service/"
+	fi ;;
+	*) update-rc.d "$1" defaults 2>/dev/null || true ;;
 	esac
 }
 
 svc_daemon_reload() {
 	case "$_init" in
-		systemd) systemctl daemon-reload ;;
-		*)       : ;;
+	systemd) systemctl daemon-reload ;;
+	*) : ;;
 	esac
 }
 
 # Return the appropriate postfix/dovecot reload command for certbot hooks
 svc_reload_cmd() {
 	case "$_init" in
-		systemd) printf '%s' 'systemctl reload' ;;
-		runit)   printf '%s' 'sv reload' ;;
-		openrc)  printf '%s' 'rc-service' ;;
-		*)       printf '%s' 'service' ;;
+	systemd) printf '%s' 'systemctl reload' ;;
+	runit) printf '%s' 'sv reload' ;;
+	openrc) printf '%s' 'rc-service' ;;
+	*) printf '%s' 'service' ;;
 	esac
 }
 
@@ -700,10 +700,10 @@ configure_opendkim() {
 	# A fix for "Opendkim won't start: can't open PID file?",
 	# as specified here: https://serverfault.com/a/847442
 	case "$_init" in
-		systemd)
-			/lib/opendkim/opendkim.service.generate
-			svc_daemon_reload
-			;;
+	systemd)
+		/lib/opendkim/opendkim.service.generate
+		svc_daemon_reload
+		;;
 	esac
 }
 
@@ -785,22 +785,22 @@ EOF
 	_hook_line="deploy-hook = echo \"\$RENEWED_DOMAINS\""
 	_hook_line+=" | grep -q '$maildomain'"
 	case "$_init" in
-		systemd)
-			_hook_line+=" && $_reload_cmd postfix"
-			_hook_line+=" && $_reload_cmd dovecot"
-			;;
-		runit)
-			_hook_line+=" && $_reload_cmd postfix"
-			_hook_line+=" && $_reload_cmd dovecot"
-			;;
-		openrc)
-			_hook_line+=" && $_reload_cmd postfix reload"
-			_hook_line+=" && $_reload_cmd dovecot reload"
-			;;
-		*)
-			_hook_line+=" && $_reload_cmd postfix reload"
-			_hook_line+=" && $_reload_cmd dovecot reload"
-			;;
+	systemd)
+		_hook_line+=" && $_reload_cmd postfix"
+		_hook_line+=" && $_reload_cmd dovecot"
+		;;
+	runit)
+		_hook_line+=" && $_reload_cmd postfix"
+		_hook_line+=" && $_reload_cmd dovecot"
+		;;
+	openrc)
+		_hook_line+=" && $_reload_cmd postfix reload"
+		_hook_line+=" && $_reload_cmd dovecot reload"
+		;;
+	*)
+		_hook_line+=" && $_reload_cmd postfix reload"
+		_hook_line+=" && $_reload_cmd dovecot reload"
+		;;
 	esac
 	grep -q "^$_hook_line" /etc/letsencrypt/cli.ini ||
 		echo "$_hook_line" >>/etc/letsencrypt/cli.ini
