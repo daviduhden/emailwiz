@@ -70,13 +70,13 @@ svc_reload() {
 	local _svc
 	for _svc in "$@"; do
 		case "$_init" in
-			systemd) systemctl reload "$_svc" ;;
-			openrc) rc-service "$_svc" reload 2>/dev/null \
-				|| rc-service "$_svc" restart ;;
-			runit) sv reload "$_svc" 2>/dev/null \
-				|| sv restart "$_svc" ;;
-			*) service "$_svc" reload 2>/dev/null \
-				|| service "$_svc" restart ;;
+		systemd) systemctl reload "$_svc" ;;
+		openrc) rc-service "$_svc" reload 2>/dev/null ||
+			rc-service "$_svc" restart ;;
+		runit) sv reload "$_svc" 2>/dev/null ||
+			sv restart "$_svc" ;;
+		*) service "$_svc" reload 2>/dev/null ||
+			service "$_svc" restart ;;
 		esac
 	done
 }
@@ -104,13 +104,13 @@ EOF
 	fi
 
 	local domain_pattern='^[A-Za-z0-9.-]+$'
-	if ! [[ "$1" =~ $domain_pattern ]]; then
+	if ! [[ $1 =~ $domain_pattern ]]; then
 		error "Provide a valid domain as the first argument" \
 			"(letters, numbers, dashes, and dots only)."
 		exit 1
 	fi
 
-	if ! [[ "$2" =~ $domain_pattern ]]; then
+	if ! [[ $2 =~ $domain_pattern ]]; then
 		error "Provide a valid mail service domain as the second" \
 			"argument (letters, numbers, dashes, and dots only)."
 		exit 1
