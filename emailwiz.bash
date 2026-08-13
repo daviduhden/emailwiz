@@ -23,30 +23,17 @@ set -euo pipefail
 # treat unset variables as an error, and prevent errors in a
 # pipeline from being masked.
 
-# Simple colored logging
-if [[ -t 1 && ${NO_COLOR:-} != "1" ]]; then
-	GREEN="\033[32m"
-	YELLOW="\033[33m"
-	RED="\033[31m"
-	RESET="\033[0m"
-else
-	GREEN=""
-	YELLOW=""
-	RED=""
-	RESET=""
-fi
-
 log() {
-	printf '%s %b[INFO]%b %s\n' \
-		"$(date '+%Y-%m-%d %H:%M:%S')" "$GREEN" "$RESET" "$*"
+	printf '%s [INFO] %s\n' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 warn() {
-	printf '%s %b[WARN]%b %s\n' \
-		"$(date '+%Y-%m-%d %H:%M:%S')" "$YELLOW" "$RESET" "$*" >&2
+	printf '%s [WARN] %s\n' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 error() {
-	printf '%s %b[ERROR]%b %s\n' \
-		"$(date '+%Y-%m-%d %H:%M:%S')" "$RED" "$RESET" "$*" >&2
+	printf '%s [ERROR] %s\n' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 selfsigned="no" # yes or no
 
@@ -848,16 +835,14 @@ final_output_message() {
 	local mxentry="$4"
 
 	cat <<EOF
-\033[31m
  _   _
 | \ | | _____      ___
 |  \| |/ _ \ \ /\ / (_)
 | |\  | (_) \ V  V / _
-|_| \_|\___/ \_/\_/ (_)\033[0m
+|_| \_|\___/ \_/\_/ (_)
 
 Add these three records to your DNS TXT records on either your \
 registrar's site or your DNS server:
-\033[32m
 $dkimentry
 
 $dmarcentry
@@ -865,12 +850,11 @@ $dmarcentry
 $spfentry
 
 $mxentry
-\033[0m
 NOTE: You may need to omit the \`.$domain\` portion at the beginning if
 inputting them in a registrar's web interface.
 
 Also, these are now saved to \
-\033[34m~/dns_emailwizard\033[0m in case you want them in a file.
+~/dns_emailwizard in case you want them in a file.
 
 Once you do that, you're done! Check the README for how to add \
 users/accounts and how to log in.
