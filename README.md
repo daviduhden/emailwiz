@@ -31,14 +31,22 @@ I've linked this file on Github to a shorter, more memorable address on my LARBS
 ## Prerequisites for Installation
 
 1. A Debian, Devuan, or Ubuntu server with a fully qualified hostname set (e.g., `mail.example.com`). The script detects your domain from the hostname.
-2. DNS records that point at least your domain's `mail.` subdomain to your server's IP (IPv4 and IPv6). This is required on the initial run for Certbot to obtain an SSL certificate for your `mail.` subdomain.
+2. DNS records that point at least your domain's `mail.` subdomain to your server's IPv4 address. This is required on the initial run for Certbot to obtain an SSL certificate for your `mail.` subdomain. An AAAA (IPv6) record is optional; without it the server simply runs over IPv4 and the script prints a warning.
+3. **Dovecot 2.3 or 2.4.** The script detects the installed version and generates the matching `dovecot.conf` syntax.
 
 ## Configuration Options
 
 ### Environment Variables
 
 - `MAIL_SUBDOM` — override the mail subdomain (default: `mail`). Example: `MAIL_SUBDOM=post ./emailwiz.bash` to use `post.example.com` instead of `mail.example.com`. This also affects the `adddomain.bash` helper script.
-- `NO_COLOR` — set to `1` to disable colored log output.
+
+### In-Script Settings
+
+A few options at the top of `emailwiz.bash` are edited directly in the file:
+
+- `selfsigned` — set to `yes` to skip Certbot and use a 100-year self-signed certificate (isolated/LAN deployments only).
+- `allow_suboptimal_ciphers` — when set to `no`, Postfix is configured to exclude a list of weak/obsolete ciphers. The default is `yes` (broad client compatibility).
+- `use_cert_config` — set to `yes` to preseed the self-signed certificate subject fields.
 
 ### Adding Additional Domains
 
@@ -48,13 +56,22 @@ After initial setup, add extra domains with:
 ./adddomain.bash <new_domain> <mail_service_domain>
 ```
 
-This updates Postfix, generates a new DKIM key pair, and emits the required DNS records.
+This updates Postfix, generates a DKIM key pair if one does not already
+exist, and emits the required DNS records. Running it again for the same
+domain only updates the missing entries, so published DKIM keys are never
+invalidated.
+
+### Re-running the Setup Script
+
+Re-running `emailwiz.bash` purges and reinstalls the mail packages. Before
+doing so it asks for confirmation and stores a copy of the existing
+configuration under `/var/backups/emailwiz/<timestamp>/mail-config.tar.gz`.
 
 ## Mandatory Finishing Touches
 
 ### Unblock Your Ports
 
-The script configures nftables to allow mail ports (25, 465, 587, 993, 995, 110), SSH (22), and HTTP (80) locally, but many VPS providers block them by default. File a support request to have ports 25/465/587/993/995 (and 110 if needed) unblocked.
+The script configures nftables (in its own `emailwiz` table, leaving any other firewall rules in place) to allow mail ports (25, 465, 587, 993, 995, 110), SSH (22), and HTTP (80) locally, but many VPS providers block them by default. File a support request to have ports 25/465/587/993/995 (and 110 if needed) unblocked.
 
 ### DNS Records
 
@@ -63,7 +80,7 @@ At completion, the script prints DNS records required for authentication and del
 1. An MX record directing to `mail.yourdomain.tld`.
 2. A TXT record for SPF (to reduce mail spoofing).
 3. A TXT record for DMARC policies.
-4. A TXT record with your public DKIM key. This record is long and **uniquely generated** while running `emailwiz.sh` and must be added after installation.
+4. A TXT record with your public DKIM key. This record is long and **uniquely generated** while running `emailwiz.bash` and must be added after installation.
 
 They will look something like this:
 
@@ -71,10 +88,12 @@ They will look something like this:
 @	MX	10	mail.example.org
 mail._domainkey.example.org    TXT     v=DKIM1; k=rsa; p=anextremelylongsequenceoflettersandnumbersgeneratedbyopendkim
 _dmarc.example.org     TXT     v=DMARC1; p=reject; rua=mailto:dmarc@example.org; fo=1
-example.org    TXT     v=spf1 mx a: -all
+example.org    TXT     v=spf1 mx a:mail.example.org -all
 ```
 
-The records are also written to `~/dns_emailwiz` for reference.
+The records are also written to `~/dns_emailwizard` for reference. The
+`adddomain.bash` helper appends the records for extra domains to
+`~/dns_emailwizard_added`.
 
 ### Add a rDNS/PTR Record as Well!
 
@@ -147,11 +166,11 @@ organization_name=""
 
 To access mail with Thunderbird, mutt, or other clients, use:
 
-- SMTP server: `mail.uhden.dev`
+- SMTP server: `mail.example.org`
 - SMTP port: 465
-- IMAP server: `mail.uhden.dev`
+- IMAP server: `mail.example.org`
 - IMAP port: 993
-- Username `luke` (i.e. *not* `luke@lukesmith.xyz`)
+- Username `billy` (i.e. *not* `billy@example.org`)
 
 ## MTA-STS and DANE for Improved Security
 

@@ -57,7 +57,8 @@ svc_reload() {
 	local _svc
 	for _svc in "$@"; do
 		case "$_init" in
-		systemd) systemctl reload "$_svc" ;;
+		systemd) systemctl reload "$_svc" 2>/dev/null ||
+			systemctl restart "$_svc" ;;
 		openrc) rc-service "$_svc" reload 2>/dev/null ||
 			rc-service "$_svc" restart ;;
 		runit) sv reload "$_svc" 2>/dev/null ||
@@ -82,7 +83,7 @@ validate_input() {
 	if [ "$#" -ne 2 ]; then
 		cat <<EOF
 This script adds a new domain to the email server configuration.
-Usage: ./adddomain.sh <new_domain> <mail_service_domain>
+Usage: ./adddomain.bash <new_domain> <mail_service_domain>
 
 <new_domain>: The new domain you want to add.
 <mail_service_domain>: The existing mail service domain.
@@ -103,6 +104,13 @@ EOF
 		exit 1
 	fi
 
+	local subdom="${MAIL_SUBDOM:-mail}"
+	if ! [[ $subdom =~ ^[A-Za-z0-9-]+$ ]]; then
+		error "Invalid MAIL_SUBDOM value: '$subdom'" \
+			"(letters, numbers, and dashes only)."
+		exit 1
+	fi
+
 	read -r -p \
 		"Have you read and understood the above instructions? (yes/no): " \
 		response
@@ -115,11 +123,30 @@ EOF
 # Function to add new domain to Postfix configuration
 add_domain_to_postfix() {
 	local new_domain="$1"
+	local _esc="${new_domain//./\\.}"
 	log "Adding the new domain to the valid Postfix addresses..."
-	if ! grep -q "^mydestination.*$new_domain" \
+	if [ ! -f /etc/postfix/main.cf ]; then
+		error "/etc/postfix/main.cf not found; run emailwiz.bash first."
+		exit 1
+	fi
+	# Only append when the domain is not already a token in the list.
+	if ! grep -qE "^mydestination.*[ ,]${_esc}([ ,]|$)" \
 		/etc/postfix/main.cf; then
 		sed -i "/^mydestination/s/$/, $new_domain/" /etc/postfix/main.cf
 	fi
+
+	# Let authenticated users of the new domain send mail as it.
+	# Without this entry, smtpd_sender_restrictions'
+	# reject_sender_login_mismatch rejects every sender in the new
+	# domain because smtpd_sender_login_maps has no match.
+	local _lmfile="/etc/postfix/login_maps.pcre"
+	if [ ! -f "$_lmfile" ]; then
+		error "$_lmfile not found; run emailwiz.bash first."
+		exit 1
+	fi
+	local _line="/^(.*)@${_esc}$/   \${1}"
+	grep -qF "@${_esc}\$/" "$_lmfile" ||
+		printf '%s\n' "$_line" >>"$_lmfile"
 }
 
 # Function to create DKIM for the new domain
@@ -128,8 +155,12 @@ create_dkim() {
 	local subdom="${MAIL_SUBDOM:-mail}"
 	log "Creating DKIM for the new domain..."
 	mkdir -p "/etc/postfix/dkim/$new_domain"
-	opendkim-genkey -D "/etc/postfix/dkim/$new_domain" \
-		-d "$new_domain" -s "$subdom"
+	# Do not overwrite an existing key: replacing it would invalidate
+	# any DKIM record already published in DNS.
+	if [ ! -f "/etc/postfix/dkim/$new_domain/$subdom.private" ]; then
+		opendkim-genkey -b 2048 -D "/etc/postfix/dkim/$new_domain" \
+			-d "$new_domain" -s "$subdom"
+	fi
 	chgrp -R opendkim /etc/postfix/dkim/*
 	chmod -R g+r /etc/postfix/dkim/*
 }
@@ -140,12 +171,16 @@ update_dkim_tables() {
 	local subdom="${MAIL_SUBDOM:-mail}"
 	log "Adding entries to keytable and signing table..."
 	local _p="/etc/postfix/dkim/$new_domain/$subdom.private"
-	printf '%s %s\n' \
-		"$subdom._domainkey.$new_domain" \
-		"$new_domain:$subdom:$_p" \
-		>>/etc/postfix/dkim/keytable
-	echo "*@$new_domain $subdom._domainkey.$new_domain" \
-		>>/etc/postfix/dkim/signingtable
+	grep -qF "$subdom._domainkey.$new_domain " \
+		/etc/postfix/dkim/keytable 2>/dev/null ||
+		printf '%s %s\n' \
+			"$subdom._domainkey.$new_domain" \
+			"$new_domain:$subdom:$_p" \
+			>>/etc/postfix/dkim/keytable
+	grep -qF "*@$new_domain " \
+		/etc/postfix/dkim/signingtable 2>/dev/null ||
+		echo "*@$new_domain $subdom._domainkey.$new_domain" \
+			>>/etc/postfix/dkim/signingtable
 }
 
 # Function to reload services
@@ -168,7 +203,12 @@ generate_dns_entries() {
 		"/etc/postfix/dkim/$new_domain/$subdom.txt" |
 		sed -e 's/k=rsa.* "p=/k=rsa; p=/' \
 			-e "s/\"\s*).*//" |
-		grep -o 'p=.*')
+		grep -o 'p=.*' || true)
+	if [ -z "$pval" ]; then
+		warn "Could not extract the DKIM public key from" \
+			"/etc/postfix/dkim/$new_domain/$subdom.txt; the" \
+			"DKIM record below will be incomplete."
+	fi
 
 	local dkimentry="$subdom._domainkey.$new_domain"
 	dkimentry+="	TXT	v=DKIM1; k=rsa; $pval"

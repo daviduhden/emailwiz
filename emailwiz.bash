@@ -35,7 +35,8 @@ error() {
 	printf '%s [ERROR] %s\n' \
 		"$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
-selfsigned="no" # yes or no
+selfsigned="no"                # yes or no
+allow_suboptimal_ciphers="yes" # yes = keep weak ciphers, no = exclude
 
 # Init system detection for Devuan/Debian/Ubuntu compatibility
 _init=""
@@ -80,7 +81,8 @@ svc_reload() {
 	local _svc
 	for _svc in "$@"; do
 		case "$_init" in
-		systemd) systemctl reload "$_svc" ;;
+		systemd) systemctl reload "$_svc" 2>/dev/null ||
+			systemctl restart "$_svc" ;;
 		openrc) rc-service "$_svc" reload 2>/dev/null ||
 			rc-service "$_svc" restart ;;
 		runit) sv reload "$_svc" 2>/dev/null ||
@@ -95,10 +97,23 @@ svc_enable() {
 	case "$_init" in
 	systemd) systemctl enable "$1" ;;
 	openrc) rc-update add "$1" 2>/dev/null || true ;;
-	runit) if [ -d "/etc/sv/$1" ] &&
-		[ ! -L "/var/service/$1" ]; then
-		ln -s "/etc/sv/$1" "/var/service/"
-	fi ;;
+	runit)
+		# Void and Alpine use /var/service; Devuan's runit uses
+		# /etc/service. Enable in whichever directory exists.
+		local _dir
+		for _dir in /var/service /etc/service; do
+			if [ -d "$_dir" ]; then
+				[ -d "/etc/sv/$1" ] &&
+					[ ! -L "$_dir/$1" ] &&
+					ln -s "/etc/sv/$1" "$_dir/"
+				return 0
+			fi
+		done
+		if [ -d "/etc/sv/$1" ]; then
+			mkdir -p /var/service
+			ln -s "/etc/sv/$1" /var/service/
+		fi
+		;;
 	*) update-rc.d "$1" defaults 2>/dev/null || true ;;
 	esac
 }
@@ -134,8 +149,8 @@ confirm_installation() {
 	cat <<EOF
 BEFORE INSTALLING
 
-Have a Debian or Ubuntu server with a static IP and DNS records (usually
-A/AAAA) that point your domain name to it.
+Have a Debian, Devuan or Ubuntu server with a static IP and DNS records
+(usually A/AAAA) that point your domain name to it.
 
 NOTE WHILE INSTALLING
 
@@ -159,9 +174,35 @@ EOF
 	fi
 }
 
+# Back up existing mail configuration before a destructive reinstall.
+# The archive is stored under /var/backups so a purge does not wipe it.
+backup_mail_config() {
+	local _ts _bkdir _rel
+	local -a _rels=()
+	_ts="$(date '+%Y%m%d-%H%M%S')"
+	_bkdir="/var/backups/emailwiz/$_ts"
+	for _rel in etc/postfix etc/dovecot etc/opendkim \
+		etc/opendkim.conf etc/nftables.conf etc/fail2ban \
+		etc/letsencrypt; do
+		[ -e "/$_rel" ] && _rels+=("$_rel")
+	done
+	[ ${#_rels[@]} -eq 0 ] && return 0
+	if ! mkdir -p "$_bkdir"; then
+		warn "Could not create backup directory $_bkdir."
+		return 0
+	fi
+	if tar -czf "$_bkdir/mail-config.tar.gz" -C / "${_rels[@]}"; then
+		log "Backed up existing configuration to" \
+			"$_bkdir/mail-config.tar.gz"
+	else
+		warn "Could not archive existing configuration."
+	fi
+}
+
 # Function to install required packages
 install_packages() {
 	umask 0022
+	local _re
 	local packages=(
 		postfix postfix-pcre dovecot-imapd dovecot-pop3d
 		dovecot-sieve opendkim opendkim-tools spamassassin
@@ -175,6 +216,7 @@ install_packages() {
 		warn "This will PURGE and reinstall all packages."
 		warn "Configuration in /etc/postfix and /etc/dovecot"
 		warn "  will be backed up before purge."
+		backup_mail_config
 		read -r -p "Continue with purge and reinstall? (yes/no): " _re
 		if [ "$_re" != "yes" ]; then
 			error "Aborting installation."
@@ -185,6 +227,40 @@ install_packages() {
 	apt-get purge --auto-remove -y "${packages[@]}"
 	log "Installing required packages..."
 	apt-get install -y "${packages[@]}"
+}
+
+# Function to configure the firewall with nftables
+configure_firewall() {
+	log "Configuring firewall with nftables..."
+	cat <<'NFTEOF' >/etc/nftables.conf
+#!/usr/sbin/nft -f
+
+# Manage a dedicated table instead of flushing the whole ruleset, so
+# any other firewall (Docker, ufw, ...) keeps working. A packet that
+# reaches the end of the input chain is still dropped.
+add table inet emailwiz
+delete table inet emailwiz
+table inet emailwiz {
+	chain input {
+		type filter hook input priority 0; policy drop;
+		ct state established,related accept
+		iif lo accept
+		tcp dport {22, 80, 993, 465, 25, 587, 110, 995} accept
+		ip protocol icmp accept
+		meta l4proto ipv6-icmp accept
+		counter drop
+	}
+}
+NFTEOF
+	svc_enable nftables
+	if ! svc_restart nftables; then
+		warn "Could not (re)start the nftables service;" \
+			"loading the ruleset directly."
+		nft -f /etc/nftables.conf || {
+			error "Failed to load the nftables ruleset."
+			exit 1
+		}
+	fi
 }
 
 # Function to configure SSL certificates
@@ -198,6 +274,9 @@ configure_ssl() {
 	local state_or_province_name=""
 	local organization_name=""
 	local common_name
+	local possiblecert
+	local _dom_esc="${domain//./\\.}"
+	local _mail_esc="${maildomain//./\\.}"
 	common_name=$(hostname -f | tr -d '[:space:]')
 
 	if [ "$use_cert_config" = "yes" ]; then
@@ -216,49 +295,29 @@ configure_ssl() {
 	commonName              = $common_name " >"$certdir/certconfig.conf"
 	fi
 
-	log "Checking DNS records..."
+	log "Checking DNS records for $maildomain..."
 	local ipv4
-	ipv4=$(dig +short "$domain" |
+	ipv4=$(dig +short "$maildomain" |
 		grep -m1 -Eo '([0-9]+\.){3}[0-9]+' |
 		tr -d '[:space:]')
 	[ -z "$ipv4" ] && {
-		error "No IPv4 address found for the domain ($domain)." \
+		error "No IPv4 address found for $maildomain." \
 			"Please ensure that your domain's DNS records are" \
 			"correctly configured to point to your server's" \
 			"IPv4 address."
 		exit 1
 	}
 	local ipv6
-	ipv6=$(dig +short "$domain" AAAA |
+	ipv6=$(dig +short "$maildomain" AAAA |
 		grep -m1 -Eo '([0-9a-fA-F:]+)' |
 		tr -d '[:space:]')
-	[ -z "$ipv6" ] && {
-		error "No IPv6 address found for your domain ($domain)." \
-			"Please ensure that your DNS records include an" \
-			"AAAA record pointing to your server's IPv6 address."
-		exit 1
-	}
-
-	log "Configuring firewall with nftables..."
-	cat <<'NFTEOF' >/etc/nftables.conf
-#!/usr/sbin/nft -f
-
-flush ruleset
-
-table inet filter {
-	chain input {
-		type filter hook input priority 0;
-		ct state established,related accept
-		iif lo accept
-		tcp dport {22, 80, 993, 465, 25, 587, 110, 995} accept
-		ip protocol icmp accept
-		ip6 nexthdr icmpv6 accept
-		counter drop
-	}
-}
-NFTEOF
-	svc_enable nftables
-	svc_restart nftables
+	# IPv6 is optional: many providers do not offer it. Warn instead
+	# of aborting so the server can still run over IPv4 only.
+	if [ -z "$ipv6" ]; then
+		warn "No AAAA record found for $maildomain; the server" \
+			"will operate over IPv4 only. Add an AAAA record" \
+			"(and IPv6 connectivity) for full dual-stack support."
+	fi
 
 	if [ "$selfsigned" = "yes" ]; then
 		log "Generating self-signed certificate..."
@@ -278,19 +337,23 @@ NFTEOF
 				-out "$certdir/csr.pem" \
 				-config "$certdir/certconfig.conf"
 		else
-			openssl req -new -key "$certdir/privkey.pem" -out "$certdir/csr.pem"
+			openssl req -new -key "$certdir/privkey.pem" \
+				-subj "/CN=$maildomain" \
+				-out "$certdir/csr.pem"
 		fi
+		# Modern TLS clients reject certificates that rely on the
+		# Common Name, so an explicit subjectAltName is required.
 		openssl req -x509 -days 36500 \
 			-key "$certdir/privkey.pem" \
 			-in "$certdir/csr.pem" \
+			-addext "subjectAltName=DNS:$maildomain" \
 			-out "$certdir/fullchain.pem"
 	else
 		log "Obtaining Let's Encrypt certificate..."
-		nft add rule inet filter input tcp dport 80 accept 2>/dev/null || true
 
 		[ ! -d "$certdir" ] &&
 			possiblecert="$(certbot certificates 2>/dev/null |
-				grep "Domains:.* \(\*\.$domain\|$maildomain\)" \
+				grep -E "Domains:.* (\*\.${_dom_esc}|${_mail_esc})" \
 					-A 2 |
 				awk '/Certificate Path/ {print $3}' |
 				head -n1 |
@@ -343,14 +406,13 @@ configure_postfix() {
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
 	local certdir="/etc/letsencrypt/live/$maildomain"
-	local allow_suboptimal_ciphers="yes"
 
 	echo "Configuring Postfix's main.cf..."
 
 	# Adding additional vars to fix an issue with receiving emails
 	# (relay access denied) and adding it to mydestination.
 	postconf -e "myhostname = $maildomain"
-	postconf -e "mail_name = $domain" #This is for the smtpd_banner
+	postconf -e "mail_name = $domain" # This is for the smtpd_banner
 	postconf -e "mydomain = $domain"
 	local _md="mydestination = \$myhostname, \$mydomain,"
 	_md+=" mail, localhost.localdomain, localhost,"
@@ -361,8 +423,15 @@ configure_postfix() {
 	# Let's Encrypt cert/key
 	postconf -e "smtpd_tls_key_file=$certdir/privkey.pem"
 	postconf -e "smtpd_tls_cert_file=$certdir/fullchain.pem"
-	if [ "$selfsigned" != "yes" ]; then
-		postconf -e "smtp_tls_CAfile=$certdir/cert.pem"
+	# Trust the system CA store so outbound SMTP TLS certificates can
+	# actually be verified. (Pointing smtp_tls_CAfile at the server's
+	# own cert.pem, as an earlier version did, made verification
+	# meaningless.)
+	if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+		postconf -e \
+			"smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
+	elif [ -d /etc/ssl/certs ]; then
+		postconf -e "smtp_tls_CApath = /etc/ssl/certs"
 	fi
 
 	# Enable, but do not require TLS. Requiring it with other
@@ -409,18 +478,24 @@ configure_postfix() {
 	# else).
 	postconf -e 'home_mailbox = Mail/Inbox/'
 
-	# Prevent "Received From:" header in sent emails in order to
-	# prevent leakage of public ip addresses
+	# Strip the "Received:" header that Postfix adds when a client
+	# submits mail over an authenticated TLS connection (ESMTPSA).
+	# This hides the client's public IP address from recipients.
+	# Matching only ESMTPSA leaves the Received headers of inbound
+	# mail intact, which are needed for troubleshooting and spam
+	# analysis. See https://www.postfix.org/header_checks.5.html
+	# NOTE: patterns must not be indented; a leading space would make
+	# Postfix treat the line as a continuation of the previous one.
 	postconf -e "header_checks = regexp:/etc/postfix/header_checks"
-
-	# strips "Received From:" in sent emails
-	echo "/^Received:.*/     IGNORE
-	/^X-Originating-IP:/    IGNORE" >/etc/postfix/header_checks
+	printf '%s\n' \
+		'/^Received:.*with ESMTPSA/ IGNORE' \
+		'/^X-Originating-IP:/ IGNORE' \
+		>/etc/postfix/header_checks
 
 	# Create a login map file that ensures that if a sender wants
 	# to send a mail from a user at our local domain, they must be
 	# authenticated as that user
-	local _lm="/^(.*)@${domain//./\.}$/   \${1}"
+	local _lm="/^(.*)@${domain//./\\.}$/   \${1}"
 	echo "$_lm" >/etc/postfix/login_maps.pcre
 
 	echo "Configuring Postfix's master.cf..."
@@ -431,10 +506,13 @@ configure_postfix() {
 		-e '/^\s*-o\s\+smtpd_tls_security_level=encrypt/d' \
 		-e '/^\s*-o\s\+smtpd_tls_auth_only=yes/d' \
 		-e '/^\s*-o\s\+smtpd_enforce_tls=yes/d' \
+		-e '/^\s*-o\s\+content_filter=spamassassin/d' \
 		-e '/^\s*-o\s\+smtpd_client_restrictions=''permit_sasl_authenticated,reject/d' \
 		-e '/^\s*-o\s\+smtpd_sender_restrictions=''reject_sender_login_mismatch/d' \
 		-e '/^\s*-o\s\+smtpd_sender_login_maps=''pcre:\/etc\/postfix\/login_maps.pcre/d' \
 		-e '/^\s*-o\s\+smtpd_recipient_restrictions=''permit_sasl_authenticated,''reject_unauth_destination/d' \
+		-e '/^smtp[[:space:]]\+inet[[:space:]].*[[:space:]]smtpd[[:space:]]*$/s/^/#/' \
+		-e '/^smtp[[:space:]]\+unix[[:space:]].*[[:space:]]smtp[[:space:]]*$/s/^/#/' \
 		/etc/postfix/master.cf
 
 	cat >>/etc/postfix/master.cf <<EOF
@@ -479,7 +557,13 @@ configure_dovecot() {
 	# /etc/dovecot/dovecot.conf because it's easier to manage. You
 	# can get a backup of the original in /usr/share/dovecot if you
 	# want.
-	mv /etc/dovecot/dovecot.conf /etc/dovecot/dovecot.backup.conf
+	# Keep a pristine backup of the stock config; do not overwrite it
+	# with our generated config on subsequent runs.
+	if [ -f /etc/dovecot/dovecot.conf ] &&
+		[ ! -f /etc/dovecot/dovecot.backup.conf ]; then
+		mv /etc/dovecot/dovecot.conf \
+			/etc/dovecot/dovecot.backup.conf
+	fi
 
 	local _ciphers
 	_ciphers='EECDH+ECDSA+AESGCM:EECDH+aRSA+AESGCM:'
@@ -490,7 +574,134 @@ configure_dovecot() {
 	_ciphers+='!aNULL:!eNULL:!MEDIUM:!LOW:!3DES:!MD5:'
 	_ciphers+='!EXP:!PSK:!SRP:!DSS:!RC4:!SEED'
 
-	echo "# Dovecot config
+	# Dovecot fails to start if the DH parameters file is missing, so
+	# only emit the setting when it actually exists.
+	local _ssl_dh _ssl_dh24
+	if [ -f /usr/share/dovecot/dh.pem ]; then
+		_ssl_dh="ssl_dh = </usr/share/dovecot/dh.pem"
+		_ssl_dh24="ssl_server_dh_file = /usr/share/dovecot/dh.pem"
+	else
+		_ssl_dh="# ssl_dh omitted (no dh.pem); ECDHE is still used"
+		_ssl_dh24="# ssl_server_dh_file omitted (no dh.pem)"
+		warn "No DH parameters at /usr/share/dovecot/dh.pem;" \
+			"omitting ssl_dh (ECDHE will still be negotiated)."
+	fi
+
+	# Dovecot 2.4 reworked the configuration syntax: mail_location was
+	# split into mail_* settings, the SSL settings were renamed and the
+	# Sieve plugin moved to sieve_script blocks. Emit the syntax that
+	# matches the installed version.
+	local _dovecot_ver _maj _min
+	_dovecot_ver="$(dovecot --version)"
+	_maj="${_dovecot_ver%%.*}"
+	_min="${_dovecot_ver#*.}"
+	_min="${_min%%.*}"
+	_min="${_min%% *}"
+	case "$_maj" in '' | *[!0-9]*) _maj=0 ;; esac
+	case "$_min" in '' | *[!0-9]*) _min=0 ;; esac
+	log "Detected Dovecot $_dovecot_ver"
+
+	if [ "$_maj" -gt 2 ] ||
+		{ [ "$_maj" -eq 2 ] && [ "$_min" -ge 4 ]; }; then
+		log "Using the Dovecot 2.4 configuration syntax."
+		cat >/etc/dovecot/dovecot.conf <<DOVECOT24
+# Dovecot 2.4 configuration (generated by emailwiz)
+
+dovecot_config_version = 2.4.0
+dovecot_storage_version = 2.4.0
+
+ssl = required
+ssl_server_cert_file = $certdir/fullchain.pem
+ssl_server_key_file = $certdir/privkey.pem
+ssl_min_protocol = TLSv1.2
+ssl_cipher_list = $_ciphers
+ssl_server_prefer_ciphers = client
+$_ssl_dh24
+auth_mechanisms = plain login
+auth_allow_cleartext = no
+auth_username_format = %{user|username}
+
+protocols = imap pop3
+
+mail_driver = $mailbox_format
+mail_path = ~/Mail
+mail_inbox_path = ~/Mail/Inbox
+mailbox_list_layout = fs
+
+# Search for valid users in /etc/passwd
+userdb passwd {
+	driver = passwd
+}
+# Fallback: Use plain old PAM to find user passwords
+passdb pam {
+	driver = pam
+}
+
+namespace inbox {
+	inbox = yes
+	mailbox Drafts {
+		special_use = \Drafts
+		auto = subscribe
+	}
+	mailbox Junk {
+		special_use = \Junk
+		auto = subscribe
+		autoexpunge = 30d
+	}
+	mailbox Sent {
+		special_use = \Sent
+		auto = subscribe
+	}
+	mailbox Trash {
+		special_use = \Trash
+	}
+	mailbox Archive {
+		special_use = \Archive
+	}
+}
+
+# Here we let Postfix use Dovecot's authentication system.
+service auth {
+	unix_listener /var/spool/postfix/private/auth {
+		mode = 0660
+		user = postfix
+		group = postfix
+	}
+}
+
+protocol lda {
+	mail_plugins {
+		sieve = yes
+	}
+}
+
+protocol lmtp {
+	mail_plugins {
+		sieve = yes
+	}
+}
+
+protocol pop3 {
+	pop3_uidl_format = %{uid | hex(8)}%{uidvalidity | hex(8)}
+	pop3_no_flag_updates = yes
+}
+
+sieve_script personal {
+	driver = file
+	path = ~/.sieve
+	active_path = ~/.dovecot.sieve
+}
+
+sieve_script default {
+	type = default
+	name = default
+	driver = file
+	path = /var/lib/dovecot/sieve/
+}
+DOVECOT24
+	else
+		log "Using the Dovecot 2.3 configuration syntax."
+		echo "# Dovecot config
 	# Note that in the dovecot conf, you can use:
 	# %u for username
 	# %n for the name in name@domain.tld
@@ -503,7 +714,7 @@ configure_dovecot() {
 	ssl_min_protocol = TLSv1.2
 	ssl_cipher_list = $_ciphers
 	ssl_prefer_server_ciphers = yes
-	ssl_dh = </usr/share/dovecot/dh.pem
+	$_ssl_dh
 	auth_mechanisms = plain login
 	auth_username_format = %n
 
@@ -513,7 +724,7 @@ configure_dovecot() {
 	userdb {
 		driver = passwd
 	}
-	#Fallback: Use plain old PAM to find user passwords
+	# Fallback: Use plain old PAM to find user passwords
 	passdb {
 		driver = pam
 	}
@@ -577,13 +788,20 @@ configure_dovecot() {
 	}
 	" >/etc/dovecot/dovecot.conf
 
-	# If using an old version of Dovecot, remove the ssl_dl line.
-	case "$(dovecot --version)" in
-	1 | 2.1* | 2.2*) sed -i '/^ssl_dh/d' /etc/dovecot/dovecot.conf ;;
-	esac
+		# If using an old version of Dovecot, remove the ssl_dh line.
+		case "$_dovecot_ver" in
+		1 | 2.1* | 2.2*) sed -i '/^ssl_dh/d' \
+			/etc/dovecot/dovecot.conf ;;
+		esac
+	fi
+
 	grep -q '^vmail:' /etc/passwd || useradd -r -m vmail
 	mkdir -p /var/lib/dovecot/sieve/
-	chmod 700 /var/lib/dovecot/sieve/
+	# The default Sieve script is read by the LDA, which runs as the
+	# recipient user and not as vmail, so this directory must remain
+	# world-traversable and the script world-readable. A 0700 mode here
+	# prevents the spam-to-Junk rule from ever loading.
+	chmod 755 /var/lib/dovecot/sieve/
 
 	echo 'require ["fileinto", "mailbox"];
 	if header :contains "X-Spam-Flag" "YES"
@@ -593,6 +811,8 @@ configure_dovecot() {
 
 	chown -R vmail:vmail /var/lib/dovecot
 	sievec /var/lib/dovecot/sieve/default.sieve
+	chmod 644 /var/lib/dovecot/sieve/default.sieve \
+		/var/lib/dovecot/sieve/default.svbin
 }
 
 # Function to configure OpenDKIM
@@ -612,12 +832,11 @@ configure_opendkim() {
 	# to such services without a problem.
 
 	# Create an OpenDKIM key in the proper place with proper permissions.
-	echo 'Generating OpenDKIM keys...'
 	mkdir -p "/etc/postfix/dkim/$domain"
 	chmod 700 "/etc/postfix/dkim/$domain"
 
 	if [ ! -f "/etc/postfix/dkim/$domain/$subdom.private" ]; then
-		opendkim-genkey -D "/etc/postfix/dkim/$domain" \
+		opendkim-genkey -b 2048 -D "/etc/postfix/dkim/$domain" \
 			-d "$domain" -s "$subdom"
 		chgrp -R opendkim /etc/postfix/dkim/*
 		chmod -R g+r /etc/postfix/dkim/*
@@ -626,8 +845,8 @@ configure_opendkim() {
 	echo "Configuring OpenDKIM..."
 
 	# Generate the OpenDKIM info:
-	echo 'Configuring OpenDKIM...'
-	grep -q "$domain" /etc/postfix/dkim/keytable 2>/dev/null ||
+	grep -qF "$subdom._domainkey.$domain " \
+		/etc/postfix/dkim/keytable 2>/dev/null ||
 		{
 			local _p
 			_p="/etc/postfix/dkim/$domain/$subdom.private"
@@ -636,13 +855,13 @@ configure_opendkim() {
 				>>/etc/postfix/dkim/keytable
 		}
 
-	grep -q "$domain" /etc/postfix/dkim/signingtable 2>/dev/null ||
+	grep -qF "*@$domain " /etc/postfix/dkim/signingtable 2>/dev/null ||
 		echo "*@$domain $subdom._domainkey.$domain" \
 			>>/etc/postfix/dkim/signingtable
 
-	grep -q '127.0.0.1' /etc/postfix/dkim/trustedhosts 2>/dev/null ||
-		echo '127.0.0.1
-	10.1.0.0/16' >>/etc/postfix/dkim/trustedhosts
+	grep -qF '127.0.0.1' /etc/postfix/dkim/trustedhosts 2>/dev/null ||
+		printf '%s\n' '127.0.0.1' '10.1.0.0/16' \
+			>>/etc/postfix/dkim/trustedhosts
 
 	# ...and source it from opendkim.conf
 	grep -q '^KeyTable' /etc/opendkim.conf 2>/dev/null || {
@@ -663,14 +882,17 @@ configure_opendkim() {
 			>>/etc/opendkim.conf
 
 	# OpenDKIM daemon settings, removing previously activated socket.
-	sed -i '/^SOCKET/d' /etc/default/opendkim &&
+	if [ -f /etc/default/opendkim ]; then
+		sed -i '/^SOCKET/d' /etc/default/opendkim
 		echo 'SOCKET="inet:12301@localhost"' \
 			>>/etc/default/opendkim
+	else
+		warn "No /etc/default/opendkim; skipping socket setting."
+	fi
 
 	echo "Configuring Postfix with OpenDKIM settings..."
 
 	# Here we add to postconf the needed settings for working with OpenDKIM
-	echo 'Configuring Postfix with OpenDKIM settings...'
 	postconf -e 'smtpd_sasl_security_options = noanonymous, noplaintext'
 	postconf -e 'smtpd_sasl_tls_security_options = noanonymous'
 	postconf -e "myhostname = $maildomain"
@@ -680,16 +902,28 @@ configure_opendkim() {
 	postconf -e 'non_smtpd_milters = inet:localhost:12301'
 	postconf -e 'mailbox_command = /usr/lib/dovecot/deliver'
 
-	# Long-term fix to prevent SMTP smuggling
-	postconf -e 'smtpd_forbid_bare_newline = normalize'
-	postconf -e "smtpd_forbid_bare_newline_exclusions = \$mynetworks"
+	# Long-term fix to prevent SMTP smuggling. The parameter exists in
+	# Postfix 3.9, 3.8.4, 3.7.9, 3.6.13 and 3.5.23 and later; skip it
+	# on older releases that would reject the unknown setting.
+	if postconf -d 2>/dev/null |
+		grep -q '^smtpd_forbid_bare_newline '; then
+		postconf -e 'smtpd_forbid_bare_newline = normalize'
+		postconf -e \
+			"smtpd_forbid_bare_newline_exclusions = \$mynetworks"
+	else
+		warn "This Postfix is too old to support" \
+			"smtpd_forbid_bare_newline; upgrade it to mitigate" \
+			"SMTP smuggling."
+	fi
 
 	# A fix for "Opendkim won't start: can't open PID file?",
 	# as specified here: https://serverfault.com/a/847442
 	case "$_init" in
 	systemd)
-		/lib/opendkim/opendkim.service.generate
-		svc_daemon_reload
+		if [ -x /lib/opendkim/opendkim.service.generate ]; then
+			/lib/opendkim/opendkim.service.generate
+			svc_daemon_reload
+		fi
 		;;
 	esac
 }
@@ -723,20 +957,29 @@ configure_spamassassin() {
 
 	# Enable SpamAssassin update cronjob.
 	if [ -f /etc/default/spamassassin ]; then
-		sed -i "s|^CRON=0|CRON=1|" /etc/default/spamassassin
-		printf "Restarting spamassassin..."
-		svc_restart spamassassin && printf ' ...done\n'
+		sed -i 's|^CRON=0|CRON=1|' /etc/default/spamassassin
+		printf 'Restarting spamassassin...'
+		if svc_restart spamassassin; then
+			printf ' ...done\n'
+		else
+			printf ' ...FAILED\n'
+			warn "Could not restart spamassassin; check its logs."
+		fi
 		svc_enable spamassassin
 	elif [ -f /etc/default/spamd ]; then
-		sed -i "s|^CRON=0|CRON=1|" /etc/default/spamd
-		printf "Restarting spamd..."
-		svc_restart spamd && printf ' ...done\n'
+		sed -i 's|^CRON=0|CRON=1|' /etc/default/spamd
+		printf 'Restarting spamd...'
+		if svc_restart spamd; then
+			printf ' ...done\n'
+		else
+			printf ' ...FAILED\n'
+			warn "Could not restart spamd; check its logs."
+		fi
 		svc_enable spamd
 	else
-		printf '%s' \
-			"!!! Neither /etc/default/spamassassin or" \
-			" /etc/default/spamd exists, this is unexpected" \
-			" and needs to be investigated"
+		error "Neither /etc/default/spamassassin nor" \
+			"/etc/default/spamd exists; this is unexpected" \
+			"and needs investigation."
 	fi
 }
 
@@ -744,8 +987,13 @@ configure_spamassassin() {
 restart_services() {
 	echo "Restarting services..."
 	for x in opendkim dovecot postfix fail2ban; do
-		printf "Restarting %s..." "$x"
-		svc_restart "$x" && printf ' ...done\n'
+		printf 'Restarting %s...' "$x"
+		if svc_restart "$x"; then
+			printf ' ...done\n'
+		else
+			printf ' ...FAILED\n'
+			warn "Could not restart $x; check its logs."
+		fi
 		svc_enable "$x"
 	done
 }
@@ -770,7 +1018,7 @@ EOF
 	local _hook_line _reload_cmd
 	_reload_cmd="$(svc_reload_cmd)"
 	_hook_line="deploy-hook = echo \"\$RENEWED_DOMAINS\""
-	_hook_line+=" | grep -q '$maildomain'"
+	_hook_line+=" | grep -qF '$maildomain'"
 	case "$_init" in
 	systemd)
 		_hook_line+=" && $_reload_cmd postfix"
@@ -789,8 +1037,14 @@ EOF
 		_hook_line+=" && $_reload_cmd dovecot reload"
 		;;
 	esac
-	grep -q "^$_hook_line" /etc/letsencrypt/cli.ini ||
-		echo "$_hook_line" >>/etc/letsencrypt/cli.ini
+	# The deploy hook only makes sense after Certbot has been used, so
+	# skip it in isolated/self-signed mode where /etc/letsencrypt is
+	# never created.
+	if [ -d /etc/letsencrypt ]; then
+		grep -qF -- "$_hook_line" /etc/letsencrypt/cli.ini \
+			2>/dev/null ||
+			echo "$_hook_line" >>/etc/letsencrypt/cli.ini
+	fi
 }
 
 # Function to generate DNS entries
@@ -801,7 +1055,12 @@ generate_dns_entries() {
 	local pval
 	pval=$(tr -d '\n' </etc/postfix/dkim/"$domain"/"$subdom".txt |
 		sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" |
-		grep -o 'p=.*')
+		grep -o 'p=.*' || true)
+	if [ -z "$pval" ]; then
+		warn "Could not extract the DKIM public key from" \
+			"/etc/postfix/dkim/$domain/$subdom.txt; the DKIM" \
+			"DNS record below will be incomplete."
+	fi
 	dkimentry="$subdom._domainkey.$domain	TXT	v=DKIM1; k=rsa; $pval"
 	dmarcentry="_dmarc.$domain"
 	dmarcentry+="	TXT	v=DMARC1; p=reject;"
@@ -841,8 +1100,8 @@ final_output_message() {
 | |\  | (_) \ V  V / _
 |_| \_|\___/ \_/\_/ (_)
 
-Add these three records to your DNS TXT records on either your \
-registrar's site or your DNS server:
+Add these four records to your DNS on either your registrar's \
+site or your DNS server:
 $dkimentry
 
 $dmarcentry
@@ -869,14 +1128,22 @@ main() {
 	install_packages
 
 	domain="$(hostname --domain | tr -d '[:space:]')"
-	subdom=${MAIL_SUBDOM:-mail}
+	subdom="${MAIL_SUBDOM:-mail}"
 	if [ -z "$domain" ]; then
 		error "No domain found. Set a fully qualified hostname" \
 			"(e.g. 'mail.example.com') before running this script."
 		exit 1
 	fi
+	case "$subdom" in
+	'' | *[!A-Za-z0-9-]*)
+		error "Invalid MAIL_SUBDOM value: '$subdom'" \
+			"(letters, numbers and dashes only)."
+		exit 1
+		;;
+	esac
 	maildomain="$subdom.$domain"
 
+	configure_firewall
 	configure_ssl "$domain" "$subdom"
 	configure_postfix "$domain" "$subdom"
 	configure_dovecot "$domain" "$subdom"
