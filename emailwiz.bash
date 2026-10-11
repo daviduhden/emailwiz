@@ -414,9 +414,13 @@ configure_postfix() {
 	postconf -e "myhostname = $maildomain"
 	postconf -e "mail_name = $domain" # This is for the smtpd_banner
 	postconf -e "mydomain = $domain"
-	local _md="mydestination = \$myhostname, \$mydomain,"
+	# Postfix expands $myhostname/$mydomain itself, so the dollar
+	# signs are literal here.
+	# shellcheck disable=SC2016
+	local _md='mydestination = $myhostname, $mydomain,'
 	_md+=" mail, localhost.localdomain, localhost,"
-	_md+=" localhost.\$mydomain"
+	# shellcheck disable=SC2016
+	_md+=' localhost.$mydomain'
 	postconf -e "$_md"
 
 	# Change the cert/key files to the default locations of the
@@ -908,8 +912,9 @@ configure_opendkim() {
 	if postconf -d 2>/dev/null |
 		grep -q '^smtpd_forbid_bare_newline '; then
 		postconf -e 'smtpd_forbid_bare_newline = normalize'
+		# shellcheck disable=SC2016
 		postconf -e \
-			"smtpd_forbid_bare_newline_exclusions = \$mynetworks"
+			'smtpd_forbid_bare_newline_exclusions = $mynetworks'
 	else
 		warn "This Postfix is too old to support" \
 			"smtpd_forbid_bare_newline; upgrade it to mitigate" \
@@ -1017,7 +1022,10 @@ EOF
 
 	local _hook_line _reload_cmd
 	_reload_cmd="$(svc_reload_cmd)"
-	_hook_line="deploy-hook = echo \"\$RENEWED_DOMAINS\""
+	# Certbot expands $RENEWED_DOMAINS at renewal time, so keep it
+	# literal in the generated deploy hook.
+	# shellcheck disable=SC2016
+	_hook_line='deploy-hook = echo "$RENEWED_DOMAINS"'
 	_hook_line+=" | grep -qF '$maildomain'"
 	case "$_init" in
 	systemd)
