@@ -32,6 +32,92 @@ error() {
 		"$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 
+backup_dir=""
+
+# Validate a DNS name without accepting leading/trailing dots or labels.
+validate_domain() {
+	local _name="$1"
+	[ -n "$_name" ] || return 1
+	case "$_name" in
+	.* | *. | *..* | *[!A-Za-z0-9.-]*) return 1 ;;
+	esac
+	[[ "$_name" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+validate_subdom() {
+	local _name="$1"
+	[ -n "$_name" ] || return 1
+	[[ "$_name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]
+}
+
+on_error() {
+	local _status="$1"
+	error "Adding the domain failed (exit status $_status)."
+	if [ -n "$backup_dir" ] && [ -f "$backup_dir/postfix-state.tar.gz" ]; then
+		error "Configuration backup: $backup_dir/postfix-state.tar.gz"
+	fi
+	error "Inspect the logs before retrying or restoring anything."
+	exit "$_status"
+}
+
+# Save the small set of files this helper mutates. The archive is root-only.
+backup_adddomain_state() {
+	local _ts _dir _rel _old_umask
+	local -a _rels=()
+	_ts="$(date '+%Y%m%d-%H%M%S')"
+	_dir="/var/backups/emailwiz/adddomain-$_ts"
+	for _rel in etc/postfix/main.cf etc/postfix/login_maps.pcre \
+		etc/postfix/dkim/keytable etc/postfix/dkim/signingtable \
+		etc/aliases; do
+		if [ -e "/$_rel" ]; then
+			_rels+=("$_rel")
+		fi
+	done
+	if [ ${#_rels[@]} -eq 0 ]; then
+		return 0
+	fi
+	_old_umask="$(umask)"
+	umask 0077
+	if ! mkdir -p "$_dir"; then
+		warn "Could not create backup directory $_dir."
+		umask "$_old_umask"
+		return 1
+	fi
+	chmod 700 "$_dir"
+	if tar -czf "$_dir/postfix-state.tar.gz" -C / "${_rels[@]}"; then
+		chmod 600 "$_dir/postfix-state.tar.gz"
+		backup_dir="$_dir"
+		log "Backed up Postfix state to" \
+			"$_dir/postfix-state.tar.gz"
+	else
+		warn "Could not archive Postfix state."
+		umask "$_old_umask"
+		return 1
+	fi
+	umask "$_old_umask"
+}
+
+ensure_mail_alias() {
+	local _alias="$1"
+	local _target="$2"
+	[ -f /etc/aliases ] || : >/etc/aliases
+	if ! grep -qE "^${_alias}:" /etc/aliases; then
+		printf '%s: %s\n' "$_alias" "$_target" >>/etc/aliases
+		if command -v newaliases >/dev/null 2>&1; then
+			newaliases
+		elif command -v postalias >/dev/null 2>&1; then
+			postalias /etc/aliases
+		fi
+	fi
+}
+
+append_unique_line() {
+	local _file="$1"
+	local _line="$2"
+	[ -f "$_file" ] || : >"$_file"
+	grep -qxF "$_line" "$_file" || printf '%s\n' "$_line" >>"$_file"
+}
+
 # Init system detection for Devuan/Debian/Ubuntu compatibility
 _init=""
 detect_init() {
@@ -86,34 +172,51 @@ This script adds a new domain to the email server configuration.
 Usage: ./adddomain.bash <new_domain> <mail_service_domain>
 
 <new_domain>: The new domain you want to add.
-<mail_service_domain>: The existing mail service domain.
+<mail_service_domain>: The existing mail service domain (the base
+domain used when emailwiz.bash ran, for example example.org).
 EOF
 		exit 1
 	fi
 
-	local domain_pattern='^[A-Za-z0-9.-]+$'
-	if ! [[ $1 =~ $domain_pattern ]]; then
-		error "Provide a valid domain as the first argument" \
-			"(letters, numbers, dashes, and dots only)."
+	if ! validate_domain "$1"; then
+		error "Provide a valid fully qualified domain as the first" \
+			"argument (for example new.example.org)."
 		exit 1
 	fi
 
-	if ! [[ $2 =~ $domain_pattern ]]; then
+	if ! validate_domain "$2"; then
 		error "Provide a valid mail service domain as the second" \
-			"argument (letters, numbers, dashes, and dots only)."
+			"argument (for example example.org)."
+		exit 1
+	fi
+
+	if [ "$1" = "$2" ]; then
+		error "The new domain must differ from the mail service domain."
 		exit 1
 	fi
 
 	local subdom="${MAIL_SUBDOM:-mail}"
-	if ! [[ $subdom =~ ^[A-Za-z0-9-]+$ ]]; then
+	local response=""
+	if ! validate_subdom "$subdom"; then
 		error "Invalid MAIL_SUBDOM value: '$subdom'" \
-			"(letters, numbers, and dashes only)."
+			"(letters, numbers, and internal dashes only)."
 		exit 1
 	fi
 
+	cat <<EOF
+This will:
+  - add $1 to Postfix's local destinations
+  - add a sender-login entry for $1
+  - create DKIM key material if it does not exist
+  - reload OpenDKIM and Postfix
+  - print DNS records for $1
+
+The mail host must be $subdom.$2. No mailbox or user is created.
+EOF
+
 	read -r -p \
 		"Have you read and understood the above instructions? (yes/no): " \
-		response
+		response || true
 	if [ "$response" != "yes" ]; then
 		error "Please read the instructions carefully before proceeding."
 		exit 1
@@ -127,6 +230,11 @@ add_domain_to_postfix() {
 	log "Adding the new domain to the valid Postfix addresses..."
 	if [ ! -f /etc/postfix/main.cf ]; then
 		error "/etc/postfix/main.cf not found; run emailwiz.bash first."
+		exit 1
+	fi
+	if ! grep -q '^mydestination[[:space:]]*=' /etc/postfix/main.cf; then
+		error "No mydestination setting in /etc/postfix/main.cf;" \
+			"run emailwiz.bash first."
 		exit 1
 	fi
 	# Only append when the domain is not already a token in the list.
@@ -161,8 +269,12 @@ create_dkim() {
 		opendkim-genkey -b 2048 -D "/etc/postfix/dkim/$new_domain" \
 			-d "$new_domain" -s "$subdom"
 	fi
-	chgrp -R opendkim /etc/postfix/dkim/*
-	chmod -R g+r /etc/postfix/dkim/*
+	chgrp -R opendkim /etc/postfix/dkim
+	find /etc/postfix/dkim -type d -exec chmod 750 {} +
+	find /etc/postfix/dkim -type f -name '*.private' \
+		-exec chmod 640 {} +
+	find /etc/postfix/dkim -type f ! -name '*.private' \
+		-exec chmod 640 {} +
 }
 
 # Function to update DKIM tables
@@ -171,20 +283,31 @@ update_dkim_tables() {
 	local subdom="${MAIL_SUBDOM:-mail}"
 	log "Adding entries to keytable and signing table..."
 	local _p="/etc/postfix/dkim/$new_domain/$subdom.private"
-	grep -qF "$subdom._domainkey.$new_domain " \
-		/etc/postfix/dkim/keytable 2>/dev/null ||
-		printf '%s %s\n' \
-			"$subdom._domainkey.$new_domain" \
+	local _keyname="$subdom._domainkey.$new_domain"
+	if ! grep -qE "^${_keyname//./\\.}([[:space:]]|$)" \
+		/etc/postfix/dkim/keytable 2>/dev/null; then
+		printf '%s %s\n' "$_keyname" \
 			"$new_domain:$subdom:$_p" \
 			>>/etc/postfix/dkim/keytable
-	grep -qF "*@$new_domain " \
-		/etc/postfix/dkim/signingtable 2>/dev/null ||
-		echo "*@$new_domain $subdom._domainkey.$new_domain" \
-			>>/etc/postfix/dkim/signingtable
+	fi
+	append_unique_line /etc/postfix/dkim/signingtable \
+		"*@$new_domain $_keyname"
+	chgrp -R opendkim /etc/postfix/dkim
+	find /etc/postfix/dkim -type d -exec chmod 750 {} +
+	find /etc/postfix/dkim -type f -name '*.private' \
+		-exec chmod 640 {} +
+	find /etc/postfix/dkim -type f ! -name '*.private' \
+		-exec chmod 640 {} +
 }
 
-# Function to reload services
+# Function to validate and reload services
 reload_services() {
+	if command -v postfix >/dev/null 2>&1; then
+		postfix check || {
+			error "Postfix configuration check failed; not reloading."
+			exit 1
+		}
+	fi
 	log "Reloading OpenDKIM and Postfix services..."
 	svc_reload opendkim postfix
 }
@@ -197,33 +320,54 @@ generate_dns_entries() {
 	local maildomain="$subdom.$mail_service_domain"
 
 	log "Generating DKIM TXT entry..."
-	local pval
-	pval=$(sed -e '1d' -e ':a' -e 'N' -e '$!ba' \
-		-e 's/\n//g' \
-		"/etc/postfix/dkim/$new_domain/$subdom.txt" |
-		sed -e 's/k=rsa.* "p=/k=rsa; p=/' \
-			-e "s/\"\s*).*//" |
-		grep -o 'p=.*' || true)
-	if [ -z "$pval" ]; then
-		warn "Could not extract the DKIM public key from" \
-			"/etc/postfix/dkim/$new_domain/$subdom.txt; the" \
-			"DKIM record below will be incomplete."
+	local pval _out="$HOME" _owner=""
+	if [ ! -f "/etc/postfix/dkim/$new_domain/$subdom.txt" ]; then
+		error "Missing DKIM public key file:" \
+			"/etc/postfix/dkim/$new_domain/$subdom.txt"
+		exit 1
 	fi
+	pval=$(tr -d '\n' \
+		<"/etc/postfix/dkim/$new_domain/$subdom.txt" |
+		sed -e 's/.*p=//' \
+			-e 's/).*//' \
+			-e 's/["[:space:]]//g')
+	case "$pval" in
+	'' | *[!A-Za-z0-9+/=]*)
+		error "Could not extract a valid DKIM public key from" \
+			"/etc/postfix/dkim/$new_domain/$subdom.txt."
+		error "Refusing to write an incomplete DNS record."
+		exit 1
+		;;
+	esac
 
 	local dkimentry="$subdom._domainkey.$new_domain"
-	dkimentry+="	TXT	v=DKIM1; k=rsa; $pval"
+	dkimentry+="	TXT	v=DKIM1; k=rsa; p=$pval"
 	local dmarcentry="_dmarc.$new_domain"
 	dmarcentry+="	TXT	v=DMARC1; p=reject;"
 	dmarcentry+=" rua=mailto:dmarc@$new_domain; fo=1"
 	local spfentry="$new_domain	TXT	v=spf1 mx a:$maildomain -all"
 	local mxentry="$new_domain	MX	10	$maildomain"
 
-	cat <<EOF >>"$HOME/dns_emailwizard_added"
-$dkimentry
-$dmarcentry
-$spfentry
-$mxentry
-EOF
+	if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+		if command -v getent >/dev/null 2>&1; then
+			_out=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+		fi
+		if [ -z "$_out" ] || [ ! -d "$_out" ]; then
+			_out="$HOME"
+		else
+			_owner="$SUDO_USER"
+		fi
+	fi
+
+	local _dnsfile="$_out/dns_emailwizard_added"
+	append_unique_line "$_dnsfile" "$dkimentry"
+	append_unique_line "$_dnsfile" "$dmarcentry"
+	append_unique_line "$_dnsfile" "$spfentry"
+	append_unique_line "$_dnsfile" "$mxentry"
+	chmod 600 "$_dnsfile"
+	if [ -n "$_owner" ]; then
+		chown "$_owner" "$_dnsfile" 2>/dev/null || true
+	fi
 
 	echo "=== ADD THE FOLLOWING TO YOUR DNS TXT RECORDS ==="
 	cat <<EOF
@@ -232,7 +376,7 @@ $dmarcentry
 $spfentry
 $mxentry
 EOF
-	echo "They have also been stored in $HOME/dns_emailwizard_added"
+	echo "They have also been stored in $_dnsfile"
 }
 
 # Main script execution
@@ -242,11 +386,40 @@ main() {
 	validate_input "$@"
 	local new_domain="$1"
 	local mail_service_domain="$2"
+	local subdom="${MAIL_SUBDOM:-mail}"
+	local installed_domain installed_mailhost
+	installed_domain=$(postconf -h mydomain 2>/dev/null || true)
+	installed_mailhost=$(postconf -h myhostname 2>/dev/null || true)
+	if [ -n "$installed_domain" ] &&
+		[ "$installed_domain" != "$mail_service_domain" ]; then
+		error "Postfix mydomain is '$installed_domain', not" \
+			"'$mail_service_domain'. Refusing to emit records" \
+			"for the wrong mail host."
+		exit 1
+	fi
+	if [ -n "$installed_mailhost" ] &&
+		[ "$installed_mailhost" != "$subdom.$mail_service_domain" ]; then
+		error "Postfix myhostname is '$installed_mailhost', not" \
+			"'$subdom.$mail_service_domain'. Check MAIL_SUBDOM."
+		exit 1
+	fi
+	if ! backup_adddomain_state; then
+		error "Backup failed; aborting before changing Postfix."
+		exit 1
+	fi
 	add_domain_to_postfix "$new_domain"
+	if ! id -u postmaster >/dev/null 2>&1; then
+		if ! useradd -r -m -G mail postmaster; then
+			error "Failed to create the postmaster user."
+			exit 1
+		fi
+	fi
+	ensure_mail_alias dmarc postmaster
 	create_dkim "$new_domain"
 	update_dkim_tables "$new_domain"
 	reload_services
 	generate_dns_entries "$new_domain" "$mail_service_domain"
 }
 
+trap 'on_error $?' ERR
 main "$@"

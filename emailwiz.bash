@@ -37,6 +37,15 @@ error() {
 }
 selfsigned="no"                # yes or no
 allow_suboptimal_ciphers="yes" # yes = keep weak ciphers, no = exclude
+use_cert_config="no"           # yes = preseed self-signed certificate fields
+country_name=""                # IT US UK IN etc.
+state_or_province_name=""
+organization_name=""
+
+certdir=""
+backup_dir=""
+service_failures=0
+ssh_ports=()
 
 # Init system detection for Devuan/Debian/Ubuntu compatibility
 _init=""
@@ -57,6 +66,67 @@ detect_init() {
 		_init="unknown"
 	fi
 	log "Detected init system: $_init"
+}
+
+# Validate a DNS name without accepting leading/trailing dots or labels.
+validate_domain() {
+	local _name="$1"
+	[ -n "$_name" ] || return 1
+	case "$_name" in
+	.* | *. | *..* | *[!A-Za-z0-9.-]*) return 1 ;;
+	esac
+	[[ "$_name" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+validate_subdom() {
+	local _name="$1"
+	[ -n "$_name" ] || return 1
+	[[ "$_name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]
+}
+
+# Find every configured SSH port so the firewall never locks out a
+# non-default SSH daemon. Fall back to the listening socket, then to 22.
+detect_ssh_ports() {
+	local _file _port
+	ssh_ports=()
+	for _file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+		[ -r "$_file" ] || continue
+		while IFS= read -r _port; do
+			case "$_port" in '' | *[!0-9]*) continue ;; esac
+			[ "$_port" -ge 1 ] && [ "$_port" -le 65535 ] || continue
+			case " ${ssh_ports[*]} " in
+			*" $_port "*) ;;
+			*) ssh_ports+=("$_port") ;;
+			esac
+		done < <(awk 'tolower($1) == "port" && $2 ~ /^[0-9]+$/ {
+			print $2
+		}' "$_file" 2>/dev/null)
+	done
+	if [ ${#ssh_ports[@]} -eq 0 ] &&
+		command -v ss >/dev/null 2>&1; then
+		_port=$(ss -tlnp 2>/dev/null |
+			awk '/sshd/ { n = split($4, a, ":"); print a[n]; exit }')
+		case "$_port" in
+		'' | *[!0-9]*) ;;
+		*) ssh_ports+=("$_port") ;;
+		esac
+	fi
+	[ ${#ssh_ports[@]} -eq 0 ] && ssh_ports=(22)
+	case " ${ssh_ports[*]} " in
+	*" 22 "*) ;;
+	*) ssh_ports+=(22) ;;
+	esac
+}
+
+build_firewall_ports() {
+	local _port _ports=""
+	for _port in "${ssh_ports[@]}" 80 443 993 465 25 587 110 995; do
+		case " ${_ports} " in
+		*" ${_port} "*) ;;
+		*) _ports="${_ports:+$_ports, }$_port" ;;
+		esac
+	done
+	printf '%s' "$_ports"
 }
 
 svc_stop() {
@@ -144,6 +214,20 @@ check_root() {
 	fi
 }
 
+# Report a failed step and point at the backup. Do not attempt an automatic
+# restore: replacing live package configuration while services are down is
+# more dangerous than leaving a clear recovery path.
+on_error() {
+	local _status="$1"
+	error "Installation failed (exit status $_status)."
+	if [ -n "$backup_dir" ] &&
+		[ -f "$backup_dir/mail-config.tar.gz" ]; then
+		error "Configuration backup: $backup_dir/mail-config.tar.gz"
+	fi
+	error "Inspect the logs before retrying or restoring anything."
+	exit "$_status"
+}
+
 # Function to confirm installation instructions
 confirm_installation() {
 	cat <<EOF
@@ -154,8 +238,8 @@ Have a Debian, Devuan or Ubuntu server with a static IP and DNS records
 
 NOTE WHILE INSTALLING
 
-On installation of Postfix, select "Internet Site" and put in \
-TLD (without \`mail.\` before it).
+The script preselects Postfix's "Internet Site" mode and sets the mail
+name to the detected mail host. No interactive Postfix prompt is expected.
 
 AFTER INSTALLING
 
@@ -165,9 +249,10 @@ generated on your machine.
 EOF
 
 	local _p="Have you read and understood the above"
+	local response=""
 	_p+=" instructions regarding the installation and"
 	_p+=" configuration of the email server? (yes/no): "
-	read -r -p "$_p" response
+	read -r -p "$_p" response || true
 	if [ "$response" != "yes" ]; then
 		error "Please read the instructions carefully before proceeding."
 		exit 1
@@ -176,68 +261,120 @@ EOF
 
 # Back up existing mail configuration before a destructive reinstall.
 # The archive is stored under /var/backups so a purge does not wipe it.
+# It contains private TLS/DKIM material, so both the directory and the
+# archive are kept private to root.
 backup_mail_config() {
-	local _ts _bkdir _rel
+	local _ts _bkdir _rel _old_umask
 	local -a _rels=()
 	_ts="$(date '+%Y%m%d-%H%M%S')"
 	_bkdir="/var/backups/emailwiz/$_ts"
 	for _rel in etc/postfix etc/dovecot etc/opendkim \
 		etc/opendkim.conf etc/nftables.conf etc/fail2ban \
-		etc/letsencrypt; do
-		[ -e "/$_rel" ] && _rels+=("$_rel")
+		etc/letsencrypt etc/ssl/emailwiz etc/aliases etc/spamassassin \
+		etc/default/opendkim etc/default/spamassassin \
+		etc/default/spamd etc/cron.weekly/postmaster-clean; do
+		if [ -e "/$_rel" ]; then
+			_rels+=("$_rel")
+		fi
 	done
-	[ ${#_rels[@]} -eq 0 ] && return 0
-	if ! mkdir -p "$_bkdir"; then
-		warn "Could not create backup directory $_bkdir."
+	if [ ${#_rels[@]} -eq 0 ]; then
+		log "No existing mail configuration to back up."
 		return 0
 	fi
+	_old_umask="$(umask)"
+	umask 0077
+	if ! mkdir -p "$_bkdir"; then
+		warn "Could not create backup directory $_bkdir."
+		umask "$_old_umask"
+		return 1
+	fi
+	chmod 700 "$_bkdir"
 	if tar -czf "$_bkdir/mail-config.tar.gz" -C / "${_rels[@]}"; then
+		chmod 600 "$_bkdir/mail-config.tar.gz"
+		backup_dir="$_bkdir"
 		log "Backed up existing configuration to" \
 			"$_bkdir/mail-config.tar.gz"
 	else
 		warn "Could not archive existing configuration."
+		umask "$_old_umask"
+		return 1
 	fi
+	umask "$_old_umask"
 }
 
 # Function to install required packages
 install_packages() {
-	umask 0022
-	local _re
+	local maildomain="$1"
+	local _re="" _existing="no" _pkg _rel
 	local packages=(
 		postfix postfix-pcre dovecot-imapd dovecot-pop3d
 		dovecot-sieve opendkim opendkim-tools spamassassin
 		spamc net-tools fail2ban bind9-host nftables
 	)
+	umask 0022
+	for _pkg in "${packages[@]}"; do
+		if dpkg -s "$_pkg" >/dev/null 2>&1; then
+			_existing="yes"
+			break
+		fi
+	done
+	for _rel in etc/postfix etc/dovecot etc/opendkim \
+		etc/opendkim.conf etc/nftables.conf etc/fail2ban; do
+		if [ -e "/$_rel" ]; then
+			_existing="yes"
+		fi
+	done
+	if [ "$_existing" = "yes" ]; then
+		warn "Existing mail server packages or configuration detected."
+		warn "This will PURGE and reinstall all packages."
+		warn "Configuration will be backed up before the purge."
+		if ! backup_mail_config; then
+			error "Backup failed; aborting before the purge."
+			exit 1
+		fi
+		read -r -p "Continue with purge and reinstall? (yes/no): " \
+			_re || true
+		if [ "$_re" != "yes" ]; then
+			error "Aborting installation; services were not stopped."
+			exit 1
+		fi
+	fi
+	log "Updating package lists..."
+	apt-get update
 	log "Stopping Dovecot and Postfix services..."
 	svc_stop dovecot
 	svc_stop postfix
-	if dpkg -s postfix >/dev/null 2>&1; then
-		warn "Existing mail server packages detected."
-		warn "This will PURGE and reinstall all packages."
-		warn "Configuration in /etc/postfix and /etc/dovecot"
-		warn "  will be backed up before purge."
-		backup_mail_config
-		read -r -p "Continue with purge and reinstall? (yes/no): " _re
-		if [ "$_re" != "yes" ]; then
-			error "Aborting installation."
-			exit 1
-		fi
+	export DEBIAN_FRONTEND=noninteractive
+	if command -v debconf-set-selections >/dev/null 2>&1; then
+		printf '%s\n' \
+			'postfix postfix/main_mailer_type select Internet Site' \
+			"postfix postfix/mailname string $maildomain" |
+			debconf-set-selections
 	fi
 	log "Purging existing packages..."
 	apt-get purge --auto-remove -y "${packages[@]}"
 	log "Installing required packages..."
 	apt-get install -y "${packages[@]}"
+	if [ "$_init" = "systemd" ]; then
+		# fail2ban's systemd backend needs this module. Its absence is
+		# reported later if the service cannot start.
+		apt-get install -y python3-systemd ||
+			warn "Could not install python3-systemd."
+	fi
 }
 
 # Function to configure the firewall with nftables
 configure_firewall() {
-	log "Configuring firewall with nftables..."
-	cat <<'NFTEOF' >/etc/nftables.conf
+	local _ports
+	_ports="$(build_firewall_ports)"
+	log "Configuring firewall with nftables (ports: $_ports)..."
+	cat <<NFTEOF >/etc/nftables.conf
 #!/usr/sbin/nft -f
 
-# Manage a dedicated table instead of flushing the whole ruleset, so
-# any other firewall (Docker, ufw, ...) keeps working. A packet that
-# reaches the end of the input chain is still dropped.
+# Manage a dedicated table without flushing the whole ruleset, so
+# other nftables tables (Docker, ufw, ...) keep working. This file
+# itself is replaced; the installer backs up the previous version.
+# The SSH port is detected to avoid locking out a non-default daemon.
 add table inet emailwiz
 delete table inet emailwiz
 table inet emailwiz {
@@ -245,13 +382,19 @@ table inet emailwiz {
 		type filter hook input priority 0; policy drop;
 		ct state established,related accept
 		iif lo accept
-		tcp dport {22, 80, 993, 465, 25, 587, 110, 995} accept
+		tcp dport { $_ports } accept
 		ip protocol icmp accept
 		meta l4proto ipv6-icmp accept
-		counter drop
+		log prefix "emailwiz drop: " counter drop
 	}
 }
 NFTEOF
+	if command -v nft >/dev/null 2>&1; then
+		nft -c -f /etc/nftables.conf || {
+			error "Invalid nftables ruleset; refusing to apply it."
+			exit 1
+		}
+	fi
 	svc_enable nftables
 	if ! svc_restart nftables; then
 		warn "Could not (re)start the nftables service;" \
@@ -268,22 +411,62 @@ configure_ssl() {
 	local domain="$1"
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
-	local certdir="/etc/letsencrypt/live/$maildomain"
-	local use_cert_config="no" # yes or no
-	local country_name=""      # IT US UK IN etc.
-	local state_or_province_name=""
-	local organization_name=""
-	local common_name
-	local possiblecert
+	local default_certdir="/etc/letsencrypt/live/$maildomain"
+	local possiblecert="" ipv4="" ipv6="" _port80
+	local common_name="$maildomain"
 	local _dom_esc="${domain//./\\.}"
 	local _mail_esc="${maildomain//./\\.}"
-	common_name=$(hostname -f | tr -d '[:space:]')
 
-	if [ "$use_cert_config" = "yes" ]; then
-		log "Creating certificate configuration..."
+	# Certbot needs a public A record. Self-signed mode is explicitly for
+	# isolated networks, so it must not require public DNS.
+	if [ "$selfsigned" != "yes" ]; then
+		log "Checking DNS records for $maildomain..."
+		ipv4=$(dig +short "$maildomain" |
+			grep -m1 -Eo '([0-9]+\.){3}[0-9]+' |
+			tr -d '[:space:]')
+		if [ -z "$ipv4" ]; then
+			error "No IPv4 address found for $maildomain." \
+				"Please ensure that your domain's DNS records are" \
+				"correctly configured to point to your server's" \
+				"IPv4 address."
+			exit 1
+		fi
+		if ! hostname -I 2>/dev/null | tr ' ' '\n' |
+			grep -qxF "$ipv4"; then
+			warn "The A record for $maildomain ($ipv4) is not one" \
+				"of this host's addresses. This is normal behind" \
+				"NAT, but Certbot will fail if the record is wrong."
+		fi
+		ipv6=$(dig +short "$maildomain" AAAA |
+			grep -m1 -Eo '([0-9a-fA-F:]+)' |
+			tr -d '[:space:]')
+		# IPv6 is optional: many providers do not offer it.
+		if [ -z "$ipv6" ]; then
+			warn "No AAAA record found for $maildomain; the server" \
+				"will operate over IPv4 only. Add an AAAA record" \
+				"(and IPv6 connectivity) for full dual-stack support."
+		fi
+	else
+		log "Self-signed mode: skipping the public DNS requirement."
+	fi
+
+	certdir="$default_certdir"
+	if [ "$selfsigned" = "yes" ]; then
+		# Keep private-CA material out of the Certbot live tree so a
+		# later trusted-certificate run cannot be overwritten.
+		certdir="/etc/ssl/emailwiz/$maildomain"
+		log "Generating self-signed certificate..."
 		mkdir -p "$certdir"
 		chmod 700 "$certdir"
-		echo "[req]
+		rm -f "$certdir/privkey.pem"
+		rm -f "$certdir/csr.pem"
+		rm -f "$certdir/fullchain.pem"
+
+		# The configuration block is only meaningful for the
+		# self-signed path. Certbot obtains its own subject fields.
+		if [ "$use_cert_config" = "yes" ]; then
+			log "Creating certificate configuration..."
+			echo "[req]
 	default_bit = 4096
 	distinguished_name = req_distinguished_name
 	question = no
@@ -293,44 +476,13 @@ configure_ssl() {
 	stateOrProvinceName     = $state_or_province_name
 	organizationName        = $organization_name
 	commonName              = $common_name " >"$certdir/certconfig.conf"
-	fi
-
-	log "Checking DNS records for $maildomain..."
-	local ipv4
-	ipv4=$(dig +short "$maildomain" |
-		grep -m1 -Eo '([0-9]+\.){3}[0-9]+' |
-		tr -d '[:space:]')
-	[ -z "$ipv4" ] && {
-		error "No IPv4 address found for $maildomain." \
-			"Please ensure that your domain's DNS records are" \
-			"correctly configured to point to your server's" \
-			"IPv4 address."
-		exit 1
-	}
-	local ipv6
-	ipv6=$(dig +short "$maildomain" AAAA |
-		grep -m1 -Eo '([0-9a-fA-F:]+)' |
-		tr -d '[:space:]')
-	# IPv6 is optional: many providers do not offer it. Warn instead
-	# of aborting so the server can still run over IPv4 only.
-	if [ -z "$ipv6" ]; then
-		warn "No AAAA record found for $maildomain; the server" \
-			"will operate over IPv4 only. Add an AAAA record" \
-			"(and IPv6 connectivity) for full dual-stack support."
-	fi
-
-	if [ "$selfsigned" = "yes" ]; then
-		log "Generating self-signed certificate..."
-		mkdir -p "$certdir"
-		chmod 700 "$certdir"
-		rm -f "$certdir/privkey.pem"
-		rm -f "$certdir/csr.pem"
-		rm -f "$certdir/fullchain.pem"
+		fi
 
 		log "Generating a 4096 rsa key and a" \
 			"self-signed certificate that lasts 100 years"
-		mkdir -p "$certdir"
+		umask 0077
 		openssl genrsa -out "$certdir/privkey.pem" 4096
+		chmod 600 "$certdir/privkey.pem"
 
 		if [ "$use_cert_config" = "yes" ]; then
 			openssl req -new -key "$certdir/privkey.pem" \
@@ -347,57 +499,150 @@ configure_ssl() {
 			-key "$certdir/privkey.pem" \
 			-in "$certdir/csr.pem" \
 			-addext "subjectAltName=DNS:$maildomain" \
+			-addext "basicConstraints=critical,CA:FALSE" \
+			-addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+			-addext "extendedKeyUsage=serverAuth" \
 			-out "$certdir/fullchain.pem"
+		chmod 644 "$certdir/fullchain.pem"
+		chmod 600 "$certdir/privkey.pem"
+		# Postfix reads the key after dropping privileges on some
+		# distributions; grant its group traverse/read without making
+		# the key world-readable.
+		if chgrp postfix "$certdir" "$certdir/privkey.pem" \
+			2>/dev/null; then
+			chmod 750 "$certdir"
+			chmod 640 "$certdir/privkey.pem"
+		fi
+		umask 0022
 	else
+		if [ "$use_cert_config" = "yes" ]; then
+			warn "use_cert_config only applies to self-signed mode;" \
+				"ignoring it because selfsigned=no."
+		fi
 		log "Obtaining Let's Encrypt certificate..."
 
-		[ ! -d "$certdir" ] &&
+		# A self-signed certificate left by a previous isolated run
+		# must not silently prevent Certbot from issuing a trusted one.
+		if [ -f "$certdir/fullchain.pem" ]; then
+			local _issuer _subject
+			_issuer=$(openssl x509 -in "$certdir/fullchain.pem" \
+				-noout -issuer 2>/dev/null || true)
+			_subject=$(openssl x509 -in "$certdir/fullchain.pem" \
+				-noout -subject 2>/dev/null || true)
+			_issuer="${_issuer#issuer=}"
+			_subject="${_subject#subject=}"
+			if [ -n "$_issuer" ] && [ "$_issuer" = "$_subject" ]; then
+				local _oldcert
+				_oldcert="$certdir.selfsigned.$(date +%s)"
+				warn "Existing certificate is self-signed;" \
+					"moving it to $_oldcert before Certbot."
+				mv "$certdir" "$_oldcert"
+			fi
+		fi
+
+		# Reuse a valid lineage only when the certificate files really
+		# exist. An empty live/ directory must not skip issuance.
+		if [ -f "$certdir/fullchain.pem" ] &&
+			[ -f "$certdir/privkey.pem" ]; then
+			log "Using existing certificate at $certdir."
+		else
 			possiblecert="$(certbot certificates 2>/dev/null |
 				grep -E "Domains:.* (\*\.${_dom_esc}|${_mail_esc})" \
 					-A 2 |
 				awk '/Certificate Path/ {print $3}' |
 				head -n1 |
-				tr -d '[:space:]')" &&
-			certdir="${possiblecert%/*}"
-
-		[ ! -d "$certdir" ] &&
-			certdir="/etc/letsencrypt/live/$maildomain" &&
-			case "$(ss -tulpn | grep ":80\s")" in
-			*nginx*)
-				apt install -y python3-certbot-nginx
-				certbot -d "$maildomain" certonly --nginx \
-					--register-unsafely-without-email --agree-tos
-				;;
-			*apache*)
-				apt install -y python3-certbot-apache
-				certbot -d "$maildomain" certonly --apache \
-					--register-unsafely-without-email --agree-tos
-				;;
-			*)
-				apt install -y python3-certbot
-				certbot -d "$maildomain" certonly --standalone \
-					--register-unsafely-without-email --agree-tos
-				;;
-			esac
+				tr -d '[:space:]' || true)"
+			if [ -n "$possiblecert" ] &&
+				[ -f "${possiblecert%/*}/fullchain.pem" ]; then
+				certdir="${possiblecert%/*}"
+				log "Using existing certificate at $certdir."
+			else
+				certdir="$default_certdir"
+				# A leftover live/ directory without usable files
+				# makes Certbot refuse to create a new lineage.
+				if [ -d "$certdir" ] &&
+					[ ! -f "$certdir/fullchain.pem" ]; then
+					mv "$certdir" \
+						"$certdir.incomplete.$(date +%s)"
+				fi
+				_port80="$(ss -tulpn 2>/dev/null || true)"
+				case "$_port80" in
+				*nginx*)
+					apt-get install -y python3-certbot-nginx
+					certbot -d "$maildomain" certonly --nginx \
+						--register-unsafely-without-email --agree-tos
+					;;
+				*apache*)
+					apt-get install -y python3-certbot-apache
+					certbot -d "$maildomain" certonly --apache \
+						--register-unsafely-without-email --agree-tos
+					;;
+				*)
+					if printf '%s\n' "$_port80" |
+						grep -q ':80 '; then
+						warn "Port 80 is in use by a service that" \
+							"is not nginx or apache; Certbot" \
+							"standalone may fail. Free port 80 or" \
+							"use a supported web server."
+					fi
+					apt-get install -y python3-certbot
+					certbot -d "$maildomain" certonly --standalone \
+						--register-unsafely-without-email --agree-tos
+					;;
+				esac
+			fi
+		fi
 	fi
 
-	[ ! -f "$certdir/fullchain.pem" ] && {
+	if [ ! -f "$certdir/fullchain.pem" ]; then
 		error "Error locating or installing SSL certificate" \
 			"(fullchain.pem not found)."
 		exit 1
-	}
-	[ ! -f "$certdir/privkey.pem" ] && {
+	fi
+	if [ ! -f "$certdir/privkey.pem" ]; then
 		error "Error locating or installing SSL certificate" \
 			"(privkey.pem not found)."
 		exit 1
-	}
-	if [ "$selfsigned" != "yes" ]; then
-		[ ! -f "$certdir/cert.pem" ] && {
-			error "Error locating or installing SSL certificate" \
-				"(cert.pem not found)."
-			exit 1
-		}
 	fi
+	if [ "$selfsigned" != "yes" ] && [ ! -f "$certdir/cert.pem" ]; then
+		error "Error locating or installing SSL certificate" \
+			"(cert.pem not found)."
+		exit 1
+	fi
+}
+
+# Add a local alias only when it is missing; never overwrite site policy.
+ensure_mail_alias() {
+	local _alias="$1"
+	local _target="$2"
+	[ -f /etc/aliases ] || : >/etc/aliases
+	if ! grep -qE "^${_alias}:" /etc/aliases; then
+		printf '%s: %s\n' "$_alias" "$_target" >>/etc/aliases
+		if command -v newaliases >/dev/null 2>&1; then
+			newaliases
+		elif command -v postalias >/dev/null 2>&1; then
+			postalias /etc/aliases
+		fi
+	fi
+}
+
+# Replace the services managed by this script without duplicating blocks.
+# Continuation lines start with whitespace, so they are removed with their
+# service header. Other master.cf services are left untouched.
+rewrite_master_cf() {
+	local _tmp
+	_tmp="$(mktemp)"
+	awk '
+		/^(smtp|submission|smtps|spamassassin)[[:space:]]/ {
+			skip = 1
+			next
+		}
+		skip && /^[[:space:]]/ { next }
+		skip && /^$/ { skip = 0; print; next }
+		{ skip = 0; print }
+	' /etc/postfix/master.cf >"$_tmp"
+	cat "$_tmp" >/etc/postfix/master.cf
+	rm -f "$_tmp"
 }
 
 # Function to configure Postfix
@@ -405,7 +650,8 @@ configure_postfix() {
 	local domain="$1"
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
-	local certdir="/etc/letsencrypt/live/$maildomain"
+	local _lmfile="/etc/postfix/login_maps.pcre"
+	local _line _esc _d
 
 	echo "Configuring Postfix's main.cf..."
 
@@ -427,10 +673,9 @@ configure_postfix() {
 	# Let's Encrypt cert/key
 	postconf -e "smtpd_tls_key_file=$certdir/privkey.pem"
 	postconf -e "smtpd_tls_cert_file=$certdir/fullchain.pem"
-	# Trust the system CA store so outbound SMTP TLS certificates can
-	# actually be verified. (Pointing smtp_tls_CAfile at the server's
-	# own cert.pem, as an earlier version did, made verification
-	# meaningless.)
+	# Provide a real CA store for policy maps and future verification.
+	# Opportunistic TLS (security_level=may) does not verify peers, so
+	# this setting alone does not authenticate remote servers.
 	if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
 		postconf -e \
 			"smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
@@ -453,10 +698,14 @@ configure_postfix() {
 	postconf -e 'smtpd_tls_protocols = ''!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
 	postconf -e 'smtp_tls_protocols = ''!SSLv2, !SSLv3, !TLSv1, !TLSv1.1'
 
-	# Exclude suboptimal ciphers.
+	# Exclude suboptimal ciphers on both inbound and outbound SMTP.
 	if [ "$allow_suboptimal_ciphers" = "no" ]; then
+		local _weak_ciphers
+		_weak_ciphers='aNULL, LOW, EXP, MEDIUM, ADH, AECDH, MD5, DSS, '
+		_weak_ciphers+='ECDSA, CAMELLIA128, 3DES, CAMELLIA256, RSA+AES, eNULL'
 		postconf -e 'tls_preempt_cipherlist = yes'
-		postconf -e 'smtpd_tls_exclude_ciphers = aNULL, ''LOW, EXP, MEDIUM, ADH, AECDH, MD5, DSS, ECDSA, ''CAMELLIA128, 3DES, CAMELLIA256, RSA+AES, eNULL'
+		postconf -e "smtpd_tls_exclude_ciphers = $_weak_ciphers"
+		postconf -e "smtp_tls_exclude_ciphers = $_weak_ciphers"
 	fi
 
 	# Here we tell Postfix to look to Dovecot for authenticating
@@ -498,45 +747,46 @@ configure_postfix() {
 
 	# Create a login map file that ensures that if a sender wants
 	# to send a mail from a user at our local domain, they must be
-	# authenticated as that user
-	local _lm="/^(.*)@${domain//./\\.}$/   \${1}"
-	echo "$_lm" >/etc/postfix/login_maps.pcre
+	# authenticated as that user. Preserve entries added by
+	# adddomain.bash instead of truncating the file on every run.
+	touch "$_lmfile"
+	for _d in "$domain" "$maildomain"; do
+		_esc="${_d//./\\.}"
+		_line="/^(.*)@${_esc}$/   \${1}"
+		grep -qxF "$_line" "$_lmfile" ||
+			printf '%s\n' "$_line" >>"$_lmfile"
+	done
+
+	# Alias local mail so DMARC reports have a deliverable mailbox.
+	postconf -e 'alias_maps = hash:/etc/aliases'
+	postconf -e 'alias_database = hash:/etc/aliases'
+	ensure_mail_alias dmarc postmaster
 
 	echo "Configuring Postfix's master.cf..."
 
-	# Remove existing configurations from master.cf
-	sed -i \
-		-e '/^\s*-o\s\+syslog_name=postfix\/submission/d' \
-		-e '/^\s*-o\s\+smtpd_tls_security_level=encrypt/d' \
-		-e '/^\s*-o\s\+smtpd_tls_auth_only=yes/d' \
-		-e '/^\s*-o\s\+smtpd_enforce_tls=yes/d' \
-		-e '/^\s*-o\s\+content_filter=spamassassin/d' \
-		-e '/^\s*-o\s\+smtpd_client_restrictions=''permit_sasl_authenticated,reject/d' \
-		-e '/^\s*-o\s\+smtpd_sender_restrictions=''reject_sender_login_mismatch/d' \
-		-e '/^\s*-o\s\+smtpd_sender_login_maps=''pcre:\/etc\/postfix\/login_maps.pcre/d' \
-		-e '/^\s*-o\s\+smtpd_recipient_restrictions=''permit_sasl_authenticated,''reject_unauth_destination/d' \
-		-e '/^smtp[[:space:]]\+inet[[:space:]].*[[:space:]]smtpd[[:space:]]*$/s/^/#/' \
-		-e '/^smtp[[:space:]]\+unix[[:space:]].*[[:space:]]smtp[[:space:]]*$/s/^/#/' \
-		/etc/postfix/master.cf
+	# Remove our previous service blocks (including stock smtp entries)
+	# before appending a fresh set. This makes repeated runs idempotent.
+	rewrite_master_cf
 
 	cat >>/etc/postfix/master.cf <<EOF
 smtp unix - - n - - smtp
-smtp inet n - y - - smtpd
+smtp inet n - n - - smtpd
 	-o content_filter=spamassassin
-submission inet n       -       y       -       -       smtpd
+submission inet n       -       n       -       -       smtpd
 	-o syslog_name=postfix/submission
 	-o smtpd_tls_security_level=encrypt
 	-o smtpd_tls_auth_only=yes
-	-o smtpd_enforce_tls=yes
 	-o smtpd_client_restrictions=permit_sasl_authenticated,reject
-	-o smtpd_sender_restrictions=reject_sender_login_mismatch
+	-o smtpd_sender_restrictions=reject_sender_login_mismatch,reject_unknown_sender_domain
 	-o smtpd_sender_login_maps=pcre:/etc/postfix/login_maps.pcre
 	-o smtpd_recipient_restrictions=\
-permit_sasl_authenticated,reject_unauth_destination
-smtps     inet  n       -       y       -       -       smtpd
+permit_sasl_authenticated,reject_unauth_destination,reject_unknown_recipient_domain
+smtps     inet  n       -       n       -       -       smtpd
 	-o syslog_name=postfix/smtps
 	-o smtpd_tls_wrappermode=yes
+	-o smtpd_tls_auth_only=yes
 	-o smtpd_sasl_auth_enable=yes
+	-o smtpd_client_restrictions=permit_sasl_authenticated,reject
 spamassassin unix -     n       n       -       -       pipe
 	user=debian-spamd argv=/usr/bin/spamc -f -e \
 		/usr/sbin/sendmail -oi -f \${sender} \${recipient}
@@ -548,9 +798,7 @@ configure_dovecot() {
 	local domain="$1"
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
-	local certdir="/etc/letsencrypt/live/$maildomain"
 	local mailbox_format="maildir"
-	local allowed_protocols=" imap pop3 "
 
 	echo "Creating Dovecot config..."
 
@@ -632,13 +880,12 @@ mail_path = ~/Mail
 mail_inbox_path = ~/Mail/Inbox
 mailbox_list_layout = fs
 
-# Search for valid users in /etc/passwd
+# Search for valid users in /etc/passwd. Dovecot 2.4 selects the
+# driver from the block name; the old "driver =" setting is not valid.
 userdb passwd {
-	driver = passwd
 }
 # Fallback: Use plain old PAM to find user passwords
 passdb pam {
-	driver = pam
 }
 
 namespace inbox {
@@ -700,7 +947,7 @@ sieve_script default {
 	type = default
 	name = default
 	driver = file
-	path = /var/lib/dovecot/sieve/
+	path = /var/lib/dovecot/sieve/default.sieve
 }
 DOVECOT24
 	else
@@ -722,7 +969,7 @@ DOVECOT24
 	auth_mechanisms = plain login
 	auth_username_format = %n
 
-	protocols = \$protocols $allowed_protocols
+	protocols = imap pop3
 
 	# Search for valid users in /etc/passwd
 	userdb {
@@ -794,7 +1041,7 @@ DOVECOT24
 
 		# If using an old version of Dovecot, remove the ssl_dh line.
 		case "$_dovecot_ver" in
-		1 | 2.1* | 2.2*) sed -i '/^ssl_dh/d' \
+		1 | 2.1* | 2.2*) sed -i '/^[[:space:]]*ssl_dh/d' \
 			/etc/dovecot/dovecot.conf ;;
 		esac
 	fi
@@ -819,11 +1066,31 @@ DOVECOT24
 		/var/lib/dovecot/sieve/default.svbin
 }
 
+# OpenDKIM runs as the unprivileged opendkim user on Debian. Directories
+# must be traversable by its group; private keys only need group read.
+fix_dkim_permissions() {
+	local _root="/etc/postfix/dkim"
+	[ -d "$_root" ] || return 0
+	chgrp -R opendkim "$_root"
+	find "$_root" -type d -exec chmod 750 {} +
+	find "$_root" -type f -name '*.private' -exec chmod 640 {} +
+	find "$_root" -type f ! -name '*.private' -exec chmod 640 {} +
+}
+
+# Append a line only when the exact line is absent.
+append_unique_line() {
+	local _file="$1"
+	local _line="$2"
+	touch "$_file"
+	grep -qxF "$_line" "$_file" || printf '%s\n' "$_line" >>"$_file"
+}
+
 # Function to configure OpenDKIM
 configure_opendkim() {
 	local domain="$1"
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
+	local _p _keyname
 
 	echo "Generating OpenDKIM keys..."
 
@@ -837,53 +1104,73 @@ configure_opendkim() {
 
 	# Create an OpenDKIM key in the proper place with proper permissions.
 	mkdir -p "/etc/postfix/dkim/$domain"
-	chmod 700 "/etc/postfix/dkim/$domain"
 
 	if [ ! -f "/etc/postfix/dkim/$domain/$subdom.private" ]; then
 		opendkim-genkey -b 2048 -D "/etc/postfix/dkim/$domain" \
 			-d "$domain" -s "$subdom"
-		chgrp -R opendkim /etc/postfix/dkim/*
-		chmod -R g+r /etc/postfix/dkim/*
 	fi
+	fix_dkim_permissions
 
 	echo "Configuring OpenDKIM..."
 
-	# Generate the OpenDKIM info:
-	grep -qF "$subdom._domainkey.$domain " \
-		/etc/postfix/dkim/keytable 2>/dev/null ||
-		{
-			local _p
-			_p="/etc/postfix/dkim/$domain/$subdom.private"
-			printf '%s %s\n' "$subdom._domainkey.$domain" \
-				"$domain:$subdom:$_p" \
-				>>/etc/postfix/dkim/keytable
-		}
+	# Generate the OpenDKIM info. Use a whitespace-tolerant check so an
+	# entry written with tabs is not duplicated.
+	_keyname="$subdom._domainkey.$domain"
+	_p="/etc/postfix/dkim/$domain/$subdom.private"
+	if ! grep -qE "^${_keyname//./\\.}([[:space:]]|$)" \
+		/etc/postfix/dkim/keytable 2>/dev/null; then
+		printf '%s %s\n' "$_keyname" \
+			"$domain:$subdom:$_p" \
+			>>/etc/postfix/dkim/keytable
+	fi
 
-	grep -qF "*@$domain " /etc/postfix/dkim/signingtable 2>/dev/null ||
-		echo "*@$domain $subdom._domainkey.$domain" \
-			>>/etc/postfix/dkim/signingtable
+	append_unique_line /etc/postfix/dkim/signingtable \
+		"*@$domain $_keyname"
+	# Mail generated by the system uses mail.$domain as its sender; sign
+	# it with the same key instead of leaving it unauthenticated.
+	append_unique_line /etc/postfix/dkim/signingtable \
+		"*@$maildomain $_keyname"
 
-	grep -qF '127.0.0.1' /etc/postfix/dkim/trustedhosts 2>/dev/null ||
-		printf '%s\n' '127.0.0.1' '10.1.0.0/16' \
-			>>/etc/postfix/dkim/trustedhosts
+	append_unique_line /etc/postfix/dkim/trustedhosts '127.0.0.0/8'
+	append_unique_line /etc/postfix/dkim/trustedhosts '::1'
+	fix_dkim_permissions
 
-	# ...and source it from opendkim.conf
-	grep -q '^KeyTable' /etc/opendkim.conf 2>/dev/null || {
-		printf '%s\n' \
-			'KeyTable file:/etc/postfix/dkim/keytable' \
-			'SigningTable refile:/etc/postfix/dkim/signingtable' \
-			'InternalHosts refile:/etc/postfix/dkim/trustedhosts' \
+	# ...and source it from opendkim.conf. Check each directive so a
+	# partial pre-existing configuration is repaired.
+	grep -q '^KeyTable' /etc/opendkim.conf 2>/dev/null ||
+		echo 'KeyTable file:/etc/postfix/dkim/keytable' \
 			>>/etc/opendkim.conf
-	}
+	grep -q '^SigningTable' /etc/opendkim.conf 2>/dev/null ||
+		echo 'SigningTable refile:/etc/postfix/dkim/signingtable' \
+			>>/etc/opendkim.conf
+	grep -q '^InternalHosts' /etc/opendkim.conf 2>/dev/null ||
+		echo 'InternalHosts refile:/etc/postfix/dkim/trustedhosts' \
+			>>/etc/opendkim.conf
 
-	sed -i '/^#Canonicalization/s/simple/relaxed\/simple/' \
+	# Debian ships Mode v (verify only) by default; signing requires s.
+	if grep -qE '^[[:space:]]*Mode[[:space:]]' /etc/opendkim.conf; then
+		sed -i -E 's|^[[:space:]]*Mode[[:space:]].*|Mode sv|' \
+			/etc/opendkim.conf
+	else
+		echo 'Mode sv' >>/etc/opendkim.conf
+	fi
+
+	# Normalize the stock commented directive instead of assuming a
+	# particular comment prefix or value.
+	if grep -qE '^[[:space:]]*#?[[:space:]]*Canonicalization' \
+		/etc/opendkim.conf; then
+		sed -i -E \
+			's|^[[:space:]]*#?[[:space:]]*Canonicalization.*|Canonicalization relaxed/simple|' \
+			/etc/opendkim.conf
+	else
+		echo 'Canonicalization relaxed/simple' >>/etc/opendkim.conf
+	fi
+
+	# Remove every old Socket directive, including a previously added
+	# one, then add the loopback milter socket exactly once.
+	sed -i -E '/^[[:space:]]*#?[[:space:]]*Socket[[:space:]]/d' \
 		/etc/opendkim.conf
-	sed -i '/^#Canonicalization/s/^#//' /etc/opendkim.conf
-
-	sed -i '/Socket/s/^#*/#/' /etc/opendkim.conf
-	grep -q '^Socket\s*inet:12301@localhost' /etc/opendkim.conf ||
-		echo 'Socket inet:12301@localhost' \
-			>>/etc/opendkim.conf
+	echo 'Socket inet:12301@localhost' >>/etc/opendkim.conf
 
 	# OpenDKIM daemon settings, removing previously activated socket.
 	if [ -f /etc/default/opendkim ]; then
@@ -937,54 +1224,68 @@ configure_opendkim() {
 configure_fail2ban() {
 	echo "Enabling fail2ban security for dovecot and postfix..."
 
-	# Enable fail2ban security for dovecot and postfix.
-	[ ! -f /etc/fail2ban/jail.d/emailwiz.local ] && echo "[postfix]
+	# These files belong to emailwiz, so rewrite them on every run. This
+	# removes stale jails (for example the inert sieve jail used by older
+	# versions) and makes the result deterministic.
+	cat >/etc/fail2ban/jail.d/emailwiz.local <<'EOF'
+[postfix]
 enabled = true
 [postfix-sasl]
 enabled = true
-[sieve]
-enabled = true
 [dovecot]
-enabled = true" >/etc/fail2ban/jail.d/emailwiz.local
+enabled = true
+EOF
 
 	if [ "$_init" = "systemd" ]; then
-		printf '[DEFAULT]\nbackend = systemd\n' \
+		printf '%s\n' \
+			'[DEFAULT]' \
+			'backend = systemd' \
+			'ignoreip = 127.0.0.1/8 ::1' \
 			>/etc/fail2ban/jail.d/emailwiz-backend.local
 	else
-		printf '[DEFAULT]\nbackend = auto\n' \
+		printf '%s\n' \
+			'[DEFAULT]' \
+			'backend = auto' \
+			'ignoreip = 127.0.0.1/8 ::1' \
 			>/etc/fail2ban/jail.d/emailwiz-backend.local
 	fi
 }
 
 # Function to configure SpamAssassin
 configure_spamassassin() {
-	echo "Enabling SpamAssassin update cronjob..."
+	local _file _svc
+	echo "Enabling SpamAssassin..."
 
-	# Enable SpamAssassin update cronjob.
+	# Enable both the daemon and its update cronjob. Setting only CRON
+	# leaves spamd disabled on systems that ship ENABLED=0.
 	if [ -f /etc/default/spamassassin ]; then
-		sed -i 's|^CRON=0|CRON=1|' /etc/default/spamassassin
-		printf 'Restarting spamassassin...'
-		if svc_restart spamassassin; then
-			printf ' ...done\n'
-		else
-			printf ' ...FAILED\n'
-			warn "Could not restart spamassassin; check its logs."
-		fi
-		svc_enable spamassassin
+		_file=/etc/default/spamassassin
+		_svc=spamassassin
 	elif [ -f /etc/default/spamd ]; then
-		sed -i 's|^CRON=0|CRON=1|' /etc/default/spamd
-		printf 'Restarting spamd...'
-		if svc_restart spamd; then
-			printf ' ...done\n'
-		else
-			printf ' ...FAILED\n'
-			warn "Could not restart spamd; check its logs."
-		fi
-		svc_enable spamd
+		_file=/etc/default/spamd
+		_svc=spamd
 	else
 		error "Neither /etc/default/spamassassin nor" \
 			"/etc/default/spamd exists; this is unexpected" \
 			"and needs investigation."
+		exit 1
+	fi
+
+	sed -i -E 's|^CRON=.*|CRON=1|; s|^ENABLED=.*|ENABLED=1|' "$_file"
+	grep -q '^CRON=' "$_file" || echo 'CRON=1' >>"$_file"
+	grep -q '^ENABLED=' "$_file" || echo 'ENABLED=1' >>"$_file"
+
+	printf 'Restarting %s...' "$_svc"
+	if svc_restart "$_svc"; then
+		printf ' ...done\n'
+	else
+		printf ' ...FAILED\n'
+		warn "Could not restart $_svc; check its logs."
+		service_failures=$((service_failures + 1))
+	fi
+	if ! svc_enable "$_svc"; then
+		warn "Could not enable $_svc."
+		service_failures=$((service_failures + 1))
 	fi
 }
 
@@ -998,8 +1299,12 @@ restart_services() {
 		else
 			printf ' ...FAILED\n'
 			warn "Could not restart $x; check its logs."
+			service_failures=$((service_failures + 1))
 		fi
-		svc_enable "$x"
+		if ! svc_enable "$x"; then
+			warn "Could not enable $x."
+			service_failures=$((service_failures + 1))
+		fi
 	done
 }
 
@@ -1007,18 +1312,21 @@ restart_services() {
 create_cronjob() {
 	local maildomain="$1"
 
-	svc_enable nftables
-	svc_restart nftables >/dev/null 2>&1 || true
-
 	echo "Creating cronjob to delete month-old postmaster mails..."
 	cat <<EOF >/etc/cron.weekly/postmaster-clean
 #!/bin/sh
 
 find /home/postmaster/Mail -type f -mtime +30 \
-	-name '*.mail*' -delete >/dev/null 2>&1
+	-delete >/dev/null 2>&1
 exit 0
 EOF
 	chmod 700 /etc/cron.weekly/postmaster-clean
+
+	# Self-signed mode creates /etc/letsencrypt too, but there is no
+	# Certbot lineage to renew. Only install the hook for Certbot.
+	if [ "$selfsigned" = "yes" ] || ! command -v certbot >/dev/null 2>&1; then
+		return 0
+	fi
 
 	local _hook_line _reload_cmd
 	_reload_cmd="$(svc_reload_cmd)"
@@ -1026,7 +1334,10 @@ EOF
 	# literal in the generated deploy hook.
 	# shellcheck disable=SC2016
 	_hook_line='deploy-hook = echo "$RENEWED_DOMAINS"'
-	_hook_line+=" | grep -qF '$maildomain'"
+	_hook_line+=" | grep -qF"
+	_hook_line+=" -e '$maildomain'"
+	# A wildcard renewal lists *.example.com, not mail.example.com.
+	_hook_line+=" -e '*.$domain'"
 	case "$_init" in
 	systemd)
 		_hook_line+=" && $_reload_cmd postfix"
@@ -1045,9 +1356,8 @@ EOF
 		_hook_line+=" && $_reload_cmd dovecot reload"
 		;;
 	esac
-	# The deploy hook only makes sense after Certbot has been used, so
-	# skip it in isolated/self-signed mode where /etc/letsencrypt is
-	# never created.
+	# Only write the hook when a Certbot configuration directory
+	# exists; a certificate may already be managed outside this run.
 	if [ -d /etc/letsencrypt ]; then
 		grep -qF -- "$_hook_line" /etc/letsencrypt/cli.ini \
 			2>/dev/null ||
@@ -1060,16 +1370,24 @@ generate_dns_entries() {
 	local domain="$1"
 	local subdom="$2"
 	local maildomain="$subdom.$domain"
-	local pval
-	pval=$(tr -d '\n' </etc/postfix/dkim/"$domain"/"$subdom".txt |
-		sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" |
-		grep -o 'p=.*' || true)
-	if [ -z "$pval" ]; then
-		warn "Could not extract the DKIM public key from" \
-			"/etc/postfix/dkim/$domain/$subdom.txt; the DKIM" \
-			"DNS record below will be incomplete."
+	local pval _out="$HOME" _owner=""
+	if [ ! -f "/etc/postfix/dkim/$domain/$subdom.txt" ]; then
+		error "Missing DKIM public key file:" \
+			"/etc/postfix/dkim/$domain/$subdom.txt"
+		exit 1
 	fi
-	dkimentry="$subdom._domainkey.$domain	TXT	v=DKIM1; k=rsa; $pval"
+	pval=$(tr -d '\n' </etc/postfix/dkim/"$domain"/"$subdom".txt |
+		sed -e 's/.*p=//' -e 's/).*//' \
+			-e 's/["[:space:]]//g')
+	case "$pval" in
+	'' | *[!A-Za-z0-9+/=]*)
+		error "Could not extract a valid DKIM public key from" \
+			"/etc/postfix/dkim/$domain/$subdom.txt."
+		error "Refusing to write an incomplete DNS record."
+		exit 1
+		;;
+	esac
+	dkimentry="$subdom._domainkey.$domain	TXT	v=DKIM1; k=rsa; p=$pval"
 	dmarcentry="_dmarc.$domain"
 	dmarcentry+="	TXT	v=DMARC1; p=reject;"
 	dmarcentry+=" rua=mailto:dmarc@$domain; fo=1"
@@ -1083,8 +1401,22 @@ generate_dns_entries() {
 			exit 1
 		fi
 	fi
+	ensure_mail_alias dmarc postmaster
 
-	cat >"$HOME/dns_emailwizard" <<EOF
+	# Under sudo, write the records to the invoking user's home so the
+	# documented "~/" path is useful, then restore that ownership.
+	if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+		if command -v getent >/dev/null 2>&1; then
+			_out=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+		fi
+		if [ -z "$_out" ] || [ ! -d "$_out" ]; then
+			_out="$HOME"
+		else
+			_owner="$SUDO_USER"
+		fi
+	fi
+
+	cat >"$_out/dns_emailwizard" <<EOF
 NOTE: Elements in the entries might appear in a different order \
 in your registrar's DNS settings.
 $dkimentry
@@ -1092,6 +1424,10 @@ $dmarcentry
 $spfentry
 $mxentry
 EOF
+	chmod 600 "$_out/dns_emailwizard"
+	if [ -n "$_owner" ]; then
+		chown "$_owner" "$_out/dns_emailwizard" 2>/dev/null || true
+	fi
 }
 
 # Function to display final output message
@@ -1123,17 +1459,50 @@ inputting them in a registrar's web interface.
 Also, these are now saved to \
 ~/dns_emailwizard in case you want them in a file.
 
-Once you do that, you're done! Check the README for how to add \
+Once you do that, check the README for how to add \
 users/accounts and how to log in.
 EOF
+	if [ "$service_failures" -gt 0 ]; then
+		error "$service_failures service operation(s) failed."
+		error "Do not treat this installation as complete until the" \
+			"logs and service status have been checked."
+		exit 1
+	fi
+}
+
+# Validate generated configuration before restarting daemons.
+validate_configs() {
+	log "Validating generated configuration..."
+	if command -v postfix >/dev/null 2>&1; then
+		postfix check || {
+			error "Postfix configuration check failed."
+			exit 1
+		}
+	fi
+	if command -v doveconf >/dev/null 2>&1; then
+		doveconf -n >/dev/null || {
+			error "Dovecot configuration check failed."
+			exit 1
+		}
+	fi
+	if command -v nft >/dev/null 2>&1; then
+		nft -c -f /etc/nftables.conf || {
+			error "nftables ruleset check failed."
+			exit 1
+		}
+	fi
+	if command -v spamassassin >/dev/null 2>&1; then
+		spamassassin --lint >/dev/null 2>&1 || {
+			warn "SpamAssassin configuration lint reported problems."
+		}
+	fi
 }
 
 # Main script execution
 main() {
 	check_root
 	detect_init
-	confirm_installation
-	install_packages
+	detect_ssh_ports
 
 	domain="$(hostname --domain | tr -d '[:space:]')"
 	subdom="${MAIL_SUBDOM:-mail}"
@@ -1142,14 +1511,20 @@ main() {
 			"(e.g. 'mail.example.com') before running this script."
 		exit 1
 	fi
-	case "$subdom" in
-	'' | *[!A-Za-z0-9-]*)
-		error "Invalid MAIL_SUBDOM value: '$subdom'" \
-			"(letters, numbers and dashes only)."
+	if ! validate_domain "$domain"; then
+		error "Invalid domain detected from the hostname: '$domain'."
 		exit 1
-		;;
-	esac
+	fi
+	if ! validate_subdom "$subdom"; then
+		error "Invalid MAIL_SUBDOM value: '$subdom'" \
+			"(letters, numbers and internal dashes only)."
+		exit 1
+	fi
 	maildomain="$subdom.$domain"
+	certdir="/etc/letsencrypt/live/$maildomain"
+
+	confirm_installation
+	install_packages "$maildomain"
 
 	configure_firewall
 	configure_ssl "$domain" "$subdom"
@@ -1158,10 +1533,12 @@ main() {
 	configure_opendkim "$domain" "$subdom"
 	configure_fail2ban
 	configure_spamassassin
+	validate_configs
 	restart_services
-	create_cronjob "$maildomain"
 	generate_dns_entries "$domain" "$subdom"
+	create_cronjob "$maildomain"
 	final_output_message "$dkimentry" "$dmarcentry" "$spfentry" "$mxentry"
 }
 
+trap 'on_error $?' ERR
 main "$@"

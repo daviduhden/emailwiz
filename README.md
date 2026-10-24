@@ -9,11 +9,14 @@ I've linked this file on Github to a shorter, more memorable address on my LARBS
 - **Postfix** for sending and receiving mail.
 - **Dovecot** for client mail retrieval (IMAP/POP3).
 - Configuration that binds Postfix and Dovecot securely via PAM authentication.
-- **Spamassassin** for spam detection with support for custom filters.
+- **Spamassassin** for spam detection. The package defaults are used; add
+  site-specific rules in `/etc/spamassassin/local.cf`.
 - **OpenDKIM** to authenticate outbound mail for delivery to major providers.
 - **Certbot** for TLS certificates, when not already present.
-- **fail2ban** to harden exposed services with relevant jails enabled.
-- **nftables** to configure the firewall with mail and SSH port access.
+- **fail2ban** to harden Postfix and Dovecot with the `postfix`,
+  `postfix-sasl`, and `dovecot` jails enabled.
+- **nftables** to configure a dedicated `emailwiz` table with mail, SSH, and
+  HTTP/HTTPS access.
 - (optional) **self-signed certificate** flow that replaces Certbot for isolated deployments (e.g., LAN/VPN-only notification sinks or private messaging relays).
 
 ## This script does _not_...
@@ -31,7 +34,7 @@ I've linked this file on Github to a shorter, more memorable address on my LARBS
 ## Prerequisites for Installation
 
 1. A Debian, Devuan, or Ubuntu server with a fully qualified hostname set (e.g., `mail.example.com`). The script detects your domain from the hostname.
-2. DNS records that point at least your domain's `mail.` subdomain to your server's IPv4 address. This is required on the initial run for Certbot to obtain an SSL certificate for your `mail.` subdomain. An AAAA (IPv6) record is optional; without it the server simply runs over IPv4 and the script prints a warning.
+2. DNS records that point at least your domain's `mail.` subdomain to your server's IPv4 address. This is required on the initial run for Certbot to obtain an SSL certificate for your `mail.` subdomain. An AAAA (IPv6) record is optional; without it the server simply runs over IPv4 and the script prints a warning. The public-DNS check is skipped in self-signed mode, which is intended for isolated networks.
 3. **Dovecot 2.3 or 2.4.** The script detects the installed version and generates the matching `dovecot.conf` syntax.
 
 ## Configuration Options
@@ -66,12 +69,20 @@ invalidated.
 Re-running `emailwiz.bash` purges and reinstalls the mail packages. Before
 doing so it asks for confirmation and stores a copy of the existing
 configuration under `/var/backups/emailwiz/<timestamp>/mail-config.tar.gz`.
+The backup directory is mode `0700` and the archive is mode `0600` because
+it contains TLS and DKIM private keys. If the backup fails, the script
+aborts before the purge.
 
 ## Mandatory Finishing Touches
 
 ### Unblock Your Ports
 
-The script configures nftables (in its own `emailwiz` table, leaving any other firewall rules in place) to allow mail ports (25, 465, 587, 993, 995, 110), SSH (22), and HTTP (80) locally, but many VPS providers block them by default. File a support request to have ports 25/465/587/993/995 (and 110 if needed) unblocked.
+The script configures nftables in its own `emailwiz` table, so other tables
+(for example Docker or ufw) keep working. It replaces `/etc/nftables.conf`
+after backing it up, and allows mail ports (25, 465, 587, 993, 995, 110),
+HTTP/HTTPS (80/443), and every SSH port found in `sshd_config` (plus 22 as a
+fallback). Many VPS providers block mail ports by default. File a support
+request to have ports 25/465/587/993/995 (and 110 if needed) unblocked.
 
 ### DNS Records
 
@@ -91,9 +102,12 @@ _dmarc.example.org     TXT     v=DMARC1; p=reject; rua=mailto:dmarc@example.org;
 example.org    TXT     v=spf1 mx a:mail.example.org -all
 ```
 
-The records are also written to `~/dns_emailwizard` for reference. The
-`adddomain.bash` helper appends the records for extra domains to
-`~/dns_emailwizard_added`.
+The records are also written to `~/dns_emailwizard` for reference (the
+invoking sudo user's home when available). The `adddomain.bash` helper adds
+only missing records for extra domains to `~/dns_emailwizard_added`, so
+rerunning it does not duplicate entries.
+The script also creates a local `dmarc: postmaster` alias and a `postmaster`
+system user so DMARC aggregate reports have a deliverable address.
 
 ### Add a rDNS/PTR Record as Well!
 
@@ -128,7 +142,7 @@ A user's mail resides in `~/Mail/`. For local inspection over SSH you can instal
 
 ## Installing with Self-Signed Certificate, in "Isolated" Mode
 
-This mode omits Certbot and issues a 100-year self-signed certificate. DKIM keys are still generated. You can preseed country, state/province, and organization fields. It targets isolated/LAN/VPN deployments (notification sink or private relay). Such a setup will **not** deliver mail directly to public providers (Gmail, Outlook, etc.).
+This mode omits Certbot and issues a 100-year self-signed certificate. DKIM keys are still generated, and the public IPv4 DNS check is skipped so the script can run on a LAN without a public A record. Self-signed material is stored under `/etc/ssl/emailwiz/<mail-host>`, not in the Certbot live tree, so switching to a trusted certificate later does not overwrite it. You can preseed country, state/province, and organization fields. It targets isolated/LAN/VPN deployments (notification sink or private relay). Such a setup will **not** deliver mail directly to public providers (Gmail, Outlook, etc.).
 
 Open the script and change the following line:
 
@@ -178,7 +192,7 @@ To access mail with Thunderbird, mutt, or other clients, use:
 
 SMTP does not offer built-in security against man-in-the-middle attacks. To mitigate this risk, you can implement the MTA-STS policy, which instructs compatible senders to use verified TLS encryption when communicating with your server.
 
-To implement this, create a file named `mta-sts.txt` with the following content and host it at `https://mta-sts.example.org/.well-known/`:
+To implement this, create a file named `mta-sts.txt` with the following content and host it at `https://mta-sts.example.org/.well-known/mta-sts.txt` (the host must have a valid certificate and HTTPS access; the script opens port 443 but does not configure a web server):
 
 ```
 version: STSv1
@@ -191,25 +205,26 @@ Then, add the following DNS records:
 
 ```
 _mta-sts.example.org.   TXT    "v=STSv1; id=<id>"
-_smtp._tls.example.org. TXT    "v=TLSRPTv1;rua=mailto:postmaster@example.org"
+_smtp._tls.example.org. TXT    "v=TLSRPTv1; rua=mailto:postmaster@example.org"
+mta-sts.example.org.    A      192.0.2.10
 ```
-`<id>` can be an arbitrary number, but it's recommended to use the current Unix timestamp (`date +%s`).
+`<id>` can be an arbitrary number, but it's recommended to use the current Unix timestamp (`date +%s`). Add an AAAA record instead if the policy host is IPv6-only.
 
 ### DANE
 
 It's also recommended to set up a TLSA (DNSSEC/DANE) record for further security enhancement. Go [here](https://ssl-tools.net/tlsa-generator) to generate a TLSA record. Set the port to 25, Transport Protocol to "tcp", and specify the MX hostname as the Domain Name.
 
-After adding the TLSA DNS record, enable opportunistic DANE in Postfix by doing the following:
+DANE requires DNSSEC validation on the resolver and a TLSA record. After publishing the record, enable outbound DANE in Postfix and reload it:
 
 ```
-postconf -e 'smtpd_use_tls = yes'
 postconf -e 'smtp_dns_support_level = dnssec'
 postconf -e 'smtp_tls_security_level = dane'
-
-echo "dane       unix  -       -       n       -       -       smtp
-  -o smtp_dns_support_level=dnssec
-  -o smtp_tls_security_level=dane" >> /etc/postfix/master.cf
+postfix reload
 ```
+
+`postconf -e 'smtpd_use_tls = yes'` from older guides is obsolete and is not
+needed. Test DANE with a domain that has a valid TLSA record before relying
+on it; a broken DNSSEC chain will cause outbound delivery failures.
 
 ## Benefited from this?
 
