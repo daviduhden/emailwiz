@@ -125,3 +125,19 @@ rate limits.
 - `README.md` - certificates, self-signed mode, ports, MTA-STS, DANE.
 - `nft(8)`, `nftables.conf(5)`, `certbot(1)`, Postfix TLS documentation,
   Dovecot SSL documentation, and fail2ban `jail.conf(5)`.
+
+## Maintenance & Continuous Learning
+
+Whenever this skill is used to change the repository, review this skill after
+the implementation. Correct procedures that proved wrong, update commands,
+paths, configuration and examples, incorporate reusable findings, and remove
+outdated assumptions. Review the applicable root and nested `AGENTS.md` files,
+specialized agents and related skills; update only the knowledge affected by
+the work. Validate local references and run
+`python3 scripts/validate-agent-knowledge.py --scope worktree` plus the
+applicable project checks. For pull request comparisons, use the documented
+`--scope range --base BASE_REF --head HEAD_REF` command. The canonical validator
+is read-only and is required even when a task restricts execution of project
+scripts; this does not authorize running installers or changing the host.
+Report checks actually performed. A structural pass does not prove semantic
+relevance, and a task is incomplete until synchronization is validated.

@@ -75,13 +75,13 @@ validate_domain() {
 	case "$_name" in
 	.* | *. | *..* | *[!A-Za-z0-9.-]*) return 1 ;;
 	esac
-	[[ "$_name" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+	[[ $_name =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
 }
 
 validate_subdom() {
 	local _name="$1"
 	[ -n "$_name" ] || return 1
-	[[ "$_name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]
+	[[ $_name =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]
 }
 
 # Find every configured SSH port so the firewall never locks out a
