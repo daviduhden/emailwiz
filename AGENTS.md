@@ -14,8 +14,10 @@ Devuan. It is intentionally two standalone Bash scripts plus documentation:
 - `README.md` - user-facing setup and manual finishing steps.
 - `LICENSE` - GPLv3. Keep the copyright headers in both scripts.
 
-There is no Makefile, CI configuration, test suite, package manifest, or
-shared shell library. Do not describe commands or files that do not exist.
+There is no Makefile, test suite, package manifest, or shared shell library.
+The only CI configuration is the read-only pull-request workflow, which runs
+the shared agent-validator contract suite and range gate. Do not describe
+commands or files that do not exist.
 
 ## Commands That Exist
 
@@ -87,6 +89,25 @@ The scripts use Unix system users for mailboxes and do not configure virtual
 users, per-domain accounts, quotas, webmail, DNS-provider APIs, DKIM rotation,
 or automatic rollback. MTA-STS and DANE are documented manual steps. Do not
 silently claim these features exist.
+
+## GitHub Actions pin maintenance
+
+`.github/workflows/agent-knowledge-validation.yml` pins every external action
+to an immutable 40-character commit SHA; tags and branches are not acceptable.
+Update a pin only after verifying the release SHA, and change the `uses:` line
+and its trailing `# vX.Y.Z` comment together. Do not change triggers,
+permissions, concurrency, job names, or commands while updating a pin.
+
+| Action | Version | Commit SHA |
+| --- | --- | --- |
+| `actions/checkout` | `v7.0.1` | `3d3c42e5aac5ba805825da76410c181273ba90b1` |
+| `actions/upload-artifact` | `v7.0.2` | `cf430e030ddbb5b0abf93d22962f4752f3646cd9` |
+| `actions/cache` | `v6.1.0` | `55cc8345863c7cc4c66a329aec7e433d2d1c52a9` |
+| `actions/setup-java` | `v6.2.0` | `77dd5b2ce225ea11469928ac317850245a74ae78` |
+| `actions/setup-node` | `v7.1.0` | `949feb2413d6458794dcd2491c4babbbce0c15c1` |
+
+Validate a workflow edit with `actionlint .github/workflows/*.yml` and, when a
+`yamllint` configuration exists, `yamllint -c <config> .github/workflows`.
 
 ## Continuous Agent & Skills Maintenance
 
