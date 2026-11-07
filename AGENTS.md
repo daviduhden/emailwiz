@@ -15,8 +15,8 @@ Devuan. It is intentionally two standalone Bash scripts plus documentation:
 - `LICENSE` - GPLv3. Keep the copyright headers in both scripts.
 
 There is no Makefile, test suite, package manifest, or shared shell library.
-The only CI configuration is the read-only pull-request workflow, which runs
-the shared agent-validator contract suite and range gate. Do not describe
+The only CI configuration is the read-only manual workflow, which runs
+the shared agent-validator contract suite and worktree validation. Do not describe
 commands or files that do not exist.
 
 ## Commands That Exist
@@ -130,8 +130,8 @@ After each change:
    edits to satisfy synchronization. For a project change, at least one
    relevant knowledge artifact must receive a substantive update.
 4. Run `perl scripts/validate-agent-knowledge.pl --scope worktree` and the
-   applicable project checks. For a pull request, CI compares the base and head
-   revisions with `--scope range --base BASE_SHA --head HEAD_SHA`.
+   applicable project checks. To compare committed revisions locally, use
+   `--scope range --base BASE_SHA --head HEAD_SHA`.
 5. Review the validator output and final diff, then report the synchronization
    result. Warnings require human review; a structural pass does not establish
    semantic relevance.
